@@ -1,0 +1,43 @@
+# build artifacts
+build/
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+*.lib
+*.exp
+*.pdb
+
+# cuda / nvcc
+*.cubin
+*.ptx
+*.fatbin
+*.i
+*.ii
+
+# checkpoints, logs, profiles
+checkpoints/
+*.ckpt
+*.bin
+*.log
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+
+# python (pytorch oracles)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# slurm
+slurm-*.out
+
+# editor / os
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
