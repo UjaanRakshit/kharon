@@ -60,6 +60,27 @@ static void layout_acts(Arena *ar, Config c, Acts *a) {
   a->rowloss = (float *)arena_alloc(ar, R * 4);
 }
 
+static void layout_scratch(Arena *ar, Config c, Bwd *s) {
+  int d = c.d_model, ff = 4 * d, V = c.vocab, H = c.n_head;
+  long R = (long)c.batch * c.seq, T = c.seq, BHT2 = (long)c.batch * H * T * T;
+  float **rd[] = {&s->dx, &s->res1, &s->proj, &s->fcproj, &s->lntmp, &s->ln1, &s->ln2,
+                  &s->atto_m, &s->atto, &s->q, &s->k, &s->v, &s->lnf};
+  for (int i = 0; i < (int)(sizeof(rd) / sizeof(rd[0])); i++)
+    *rd[i] = (float *)arena_alloc(ar, R * d * 4);
+  s->fc = (float *)arena_alloc(ar, R * ff * 4);
+  s->gelu = (float *)arena_alloc(ar, R * ff * 4);
+  s->att = (float *)arena_alloc(ar, BHT2 * 4);
+  s->scores = (float *)arena_alloc(ar, BHT2 * 4);
+  s->qkv = (float *)arena_alloc(ar, R * 3 * d * 4);
+  s->logits = (float *)arena_alloc(ar, R * V * 4);
+}
+
+static long scratch_bytes(Config c) {
+  int d = c.d_model, ff = 4 * d, V = c.vocab, H = c.n_head;
+  long R = (long)c.batch * c.seq, T = c.seq;
+  return (13 * R * d + 2 * R * ff + (long)c.batch * H * T * T * 2 + R * 3 * d + R * V) * 4;
+}
+
 static long weight_bytes(Config c) {
   int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d;
   long per = 4L * d + 3L * d * d + 3 * d + (long)d * d + d + (long)ff * d + ff + (long)d * ff + d;
@@ -79,12 +100,15 @@ Model *model_create(Config cfg) {
   m->cfg = cfg;
   long wb = weight_bytes(cfg), ab = act_bytes(cfg);
   long slack = 1 << 18;
+  long sb = scratch_bytes(cfg);
   m->w_arena = arena_create("params", wb + slack, 1);
   m->g_arena = arena_create("grads", wb + slack, 1);
   m->a_arena = arena_create("acts", ab + slack, 1);
+  m->s_arena = arena_create("bwd", sb + slack, 1);
   layout_weights(&m->w_arena, cfg, &m->w);
   layout_weights(&m->g_arena, cfg, &m->g);
   layout_acts(&m->a_arena, cfg, &m->a);
+  layout_scratch(&m->s_arena, cfg, &m->s);
   long R = (long)cfg.batch * cfg.seq;
   CK(cudaMalloc((void **)&m->d_idx, R * 4));
   CK(cudaMalloc((void **)&m->d_tgt, R * 4));
@@ -96,7 +120,8 @@ void model_free(Model *m) {
   if (!m) return;
   gemm_destroy();
   cudaFree(m->d_idx); cudaFree(m->d_tgt);
-  arena_destroy(&m->w_arena); arena_destroy(&m->g_arena); arena_destroy(&m->a_arena);
+  arena_destroy(&m->w_arena); arena_destroy(&m->g_arena);
+  arena_destroy(&m->a_arena); arena_destroy(&m->s_arena);
   free(m->w.layer); free(m->g.layer); free(m->a.layer);
   free(m);
 }
@@ -181,4 +206,84 @@ float model_forward(Model *m) {
   return m->loss;
 }
 
-void model_backward(Model *m) { (void)m; }  // filled in next
+static void dcopy(float *dst, const float *src, long n) {
+  CK(cudaMemcpy(dst, src, n * 4, cudaMemcpyDeviceToDevice));
+}
+
+void model_backward(Model *m) {
+  Config c = m->cfg;
+  int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d, T = c.seq, B = c.batch;
+  long R = (long)B * T, RD = R * d;
+  long sTT = (long)T * T, sThd = (long)T * hd;
+  float scale = 1.f / sqrtf((float)hd);
+  Weights *w = &m->w, *g = &m->g;
+  Acts *a = &m->a;
+  Bwd *s = &m->s;
+
+  CK(cudaMemset(m->g_arena.base, 0, m->g_arena.off));   // zero all grads
+
+  // cross entropy + head (logits = lnf @ wte^T)
+  k_cross_entropy_bwd(a->probs, m->d_tgt, s->logits, R, V, 1.f / R);
+  mm_nn(s->logits, w->wte, s->lnf, R, d, V);
+  mm_tn(s->logits, a->lnf, g->wte, V, d, R);
+
+  float *xlast = c.n_layer ? a->layer[c.n_layer - 1].res2 : a->emb;
+  k_layernorm_bwd(s->lnf, xlast, w->lnf_w, a->lnf_mean, a->lnf_rstd,
+                  s->dx, g->lnf_w, g->lnf_b, R, d);
+
+  for (int l = c.n_layer - 1; l >= 0; l--) {
+    LayerW *L = &w->layer[l];
+    LayerW *gL = &g->layer[l];
+    LayerAct *A = &a->layer[l];
+    float *xin = l ? a->layer[l - 1].res2 : a->emb;
+
+    // res2 = res1 + fcproj : dx flows to both
+    dcopy(s->res1, s->dx, RD);
+    dcopy(s->fcproj, s->dx, RD);
+    // fcproj = gelu @ fcproj_w^T + b
+    k_colsum(s->fcproj, gL->fcproj_b, R, d);
+    mm_tn(s->fcproj, A->gelu, gL->fcproj_w, d, ff, R);
+    mm_nn(s->fcproj, L->fcproj_w, s->gelu, R, ff, d);
+    // gelu
+    k_gelu_bwd(A->fc, s->gelu, s->fc, R * ff);
+    // fc = ln2 @ fc_w^T + b
+    k_colsum(s->fc, gL->fc_b, R, ff);
+    mm_tn(s->fc, A->ln2, gL->fc_w, ff, d, R);
+    mm_nn(s->fc, L->fc_w, s->ln2, R, d, ff);
+    // ln2 = LN(res1) : accumulate into res1
+    k_layernorm_bwd(s->ln2, A->res1, L->ln2_w, A->ln2_mean, A->ln2_rstd,
+                    s->lntmp, gL->ln2_w, gL->ln2_b, R, d);
+    k_add(s->res1, s->lntmp, s->res1, RD);
+    // res1 = x + proj : dx(base) = res1, proj branch = res1
+    dcopy(s->dx, s->res1, RD);
+    dcopy(s->proj, s->res1, RD);
+    // proj = atto_m @ proj_w^T + b
+    k_colsum(s->proj, gL->proj_b, R, d);
+    mm_tn(s->proj, A->atto_m, gL->proj_w, d, d, R);
+    mm_nn(s->proj, L->proj_w, s->atto_m, R, d, d);
+    // atto_m = merge(atto)
+    k_unmerge_heads(s->atto_m, s->atto, B, T, H, hd);
+    // atto = att @ v
+    mm_nt_batched(s->atto, A->v, s->att, T, T, hd, sThd, sThd, sTT, B * H);
+    mm_tn_batched(A->att, s->atto, s->v, T, hd, T, sTT, sThd, sThd, B * H);
+    // softmax (scale folded)
+    k_softmax_causal_bwd(A->att, s->att, s->scores, B * H * T, T, scale);
+    // scores = q @ k^T
+    mm_nn_batched(s->scores, A->k, s->q, T, hd, T, sTT, sThd, sThd, B * H);
+    mm_tn_batched(s->scores, A->q, s->k, T, hd, T, sTT, sThd, sThd, B * H);
+    // qkv split -> combine
+    k_combine_qkv(s->q, s->k, s->v, s->qkv, B, T, H, hd);
+    // qkv = ln1 @ qkv_w^T + b
+    k_colsum(s->qkv, gL->qkv_b, R, 3 * d);
+    mm_tn(s->qkv, A->ln1, gL->qkv_w, 3 * d, d, R);
+    mm_nn(s->qkv, L->qkv_w, s->ln1, R, d, 3 * d);
+    // ln1 = LN(xin) : accumulate into dx
+    k_layernorm_bwd(s->ln1, xin, L->ln1_w, A->ln1_mean, A->ln1_rstd,
+                    s->lntmp, gL->ln1_w, gL->ln1_b, R, d);
+    k_add(s->dx, s->lntmp, s->dx, RD);
+  }
+
+  // embedding: dx is grad of emb
+  k_embed_bwd_wte(s->dx, m->d_idx, g->wte, R, V, d);
+  k_embed_bwd_wpe(s->dx, g->wpe, B, T, d);
+}

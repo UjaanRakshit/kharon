@@ -53,11 +53,25 @@ typedef struct {
   float *rowloss;                     // [BT]
 } Acts;
 
+// Backward scratch (activation grads), reused across layers.
+typedef struct {
+  float *dx, *res1, *proj, *fcproj, *lntmp;   // [BT,d]
+  float *ln1, *ln2;                           // [BT,d]
+  float *fc, *gelu;                           // [BT,4d]
+  float *atto_m, *atto;                       // [BT,d]
+  float *att, *scores;                        // [B,H,T,T]
+  float *q, *k, *v;                           // [BT,d]
+  float *qkv;                                 // [BT,3d]
+  float *lnf;                                 // [BT,d]
+  float *logits;                              // [BT,vocab]
+} Bwd;
+
 typedef struct {
   Config cfg;
-  Arena w_arena, g_arena, a_arena;    // params, grads, activations (device)
+  Arena w_arena, g_arena, a_arena, s_arena;   // params, grads, activations, bwd scratch
   Weights w, g;
   Acts a;
+  Bwd s;
   int *d_idx, *d_tgt;                 // device input/target [BT]
   float loss;
 } Model;
