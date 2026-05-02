@@ -24,11 +24,11 @@ ifdef CCBIN
   NVCCFLAGS += -ccbin "$(CCBIN)"
 endif
 
-CORE_C  := arena refio
-CORE_CU :=
+CORE_C  := arena refio gpt
+CORE_CU := kernels
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU)))
 
-TESTS := test_loadref
+TESTS := test_loadref test_forward
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
 
 .PHONY: all tests clean
