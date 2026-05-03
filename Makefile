@@ -28,7 +28,7 @@ CORE_C  := arena refio gpt
 CORE_CU := kernels
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU)))
 
-TESTS := test_loadref test_forward
+TESTS := test_loadref test_forward test_backward
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
 
 .PHONY: all tests clean
