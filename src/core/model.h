@@ -72,6 +72,9 @@ typedef struct {
   Weights w, g;
   Acts a;
   Bwd s;
+  Arena om_arena, ov_arena;           // AdamW moment buffers (flat over params)
+  float *opt_m, *opt_v;
+  int step;
   int *d_idx, *d_tgt;                 // device input/target [BT]
   float loss;
 } Model;
@@ -86,6 +89,7 @@ void   model_load_ref(Model *m, RefFile *r);   // copy reference weights -> devi
 void   model_set_input(Model *m, const int *idx, const int *tgt);
 float  model_forward(Model *m);                // returns loss
 void   model_backward(Model *m);
+void   model_adamw_step(Model *m, float lr, float b1, float b2, float eps, float wd);
 
 #ifdef __cplusplus
 }

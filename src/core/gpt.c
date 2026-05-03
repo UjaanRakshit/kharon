@@ -109,6 +109,15 @@ Model *model_create(Config cfg) {
   layout_weights(&m->g_arena, cfg, &m->g);
   layout_acts(&m->a_arena, cfg, &m->a);
   layout_scratch(&m->s_arena, cfg, &m->s);
+  // optimizer moments are flat over the whole param arena (identical layout)
+  long pbytes = m->w_arena.off;
+  m->om_arena = arena_create("adam_m", pbytes, 1);
+  m->ov_arena = arena_create("adam_v", pbytes, 1);
+  m->opt_m = (float *)arena_alloc(&m->om_arena, pbytes);
+  m->opt_v = (float *)arena_alloc(&m->ov_arena, pbytes);
+  CK(cudaMemset(m->opt_m, 0, pbytes));
+  CK(cudaMemset(m->opt_v, 0, pbytes));
+  m->step = 0;
   long R = (long)cfg.batch * cfg.seq;
   CK(cudaMalloc((void **)&m->d_idx, R * 4));
   CK(cudaMalloc((void **)&m->d_tgt, R * 4));
@@ -122,6 +131,7 @@ void model_free(Model *m) {
   cudaFree(m->d_idx); cudaFree(m->d_tgt);
   arena_destroy(&m->w_arena); arena_destroy(&m->g_arena);
   arena_destroy(&m->a_arena); arena_destroy(&m->s_arena);
+  arena_destroy(&m->om_arena); arena_destroy(&m->ov_arena);
   free(m->w.layer); free(m->g.layer); free(m->a.layer);
   free(m);
 }

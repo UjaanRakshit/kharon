@@ -364,3 +364,21 @@ void k_embed_bwd_wpe(const float *demb, float *dwpe, int B, int T, int d) {
   long n = (long)T * d;
   embed_bwd_wpe_k<<<ndiv(n, TPB), TPB>>>(demb, dwpe, B, T, d, n);
 }
+
+// AdamW with decoupled weight decay (matches torch.optim.AdamW).
+__global__ void adamw_k(float *p, const float *g, float *m, float *v, long n,
+                        float lr, float b1, float b2, float eps, float wd,
+                        float bc1, float bc2) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float gi = g[i];
+  float mi = b1 * m[i] + (1.f - b1) * gi;
+  float vi = b2 * v[i] + (1.f - b2) * gi * gi;
+  m[i] = mi; v[i] = vi;
+  float mhat = mi / bc1, vhat = vi / bc2;
+  p[i] = p[i] * (1.f - lr * wd) - lr * mhat / (sqrtf(vhat) + eps);
+}
+void k_adamw(float *p, const float *g, float *m, float *v, long n,
+             float lr, float b1, float b2, float eps, float wd, float bc1, float bc2) {
+  adamw_k<<<ndiv(n, TPB), TPB>>>(p, g, m, v, n, lr, b1, b2, eps, wd, bc1, bc2);
+}

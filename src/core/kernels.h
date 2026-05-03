@@ -55,6 +55,10 @@ void k_embed_bwd_wte(const float *demb, const int *idx, float *dwte,
                      int rows, int vocab, int d);
 void k_embed_bwd_wpe(const float *demb, float *dwpe, int B, int T, int d);
 
+// --- optimizer ---
+void k_adamw(float *p, const float *g, float *m, float *v, long n,
+             float lr, float b1, float b2, float eps, float wd, float bc1, float bc2);
+
 #ifdef __cplusplus
 }
 #endif
