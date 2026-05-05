@@ -30,10 +30,13 @@ OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU)))
 
 TESTS := test_loadref test_forward test_backward test_step test_resume
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
+BENCH := bench_step
+BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 
-.PHONY: all tests clean
-all: tests
+.PHONY: all tests bench clean
+all: tests bench
 tests: $(BINS)
+bench: $(BENCHBINS)
 
 $(BUILD)/%.o: src/core/%.c | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) -c $< -o $@
@@ -42,6 +45,9 @@ $(BUILD)/%.o: src/core/%.cu | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(BUILD)/%.exe: tests/%.c $(OBJ) | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
+
+$(BUILD)/%.exe: bench/%.c $(OBJ) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
 
 $(BUILD):
