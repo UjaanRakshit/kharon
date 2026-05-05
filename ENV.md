@@ -6,9 +6,11 @@
 - VRAM: 8 GB (8188 MiB) — dev configs must fit this, keep batches/seq small
 - Driver: 596.49
 - CUDA toolkit: 12.6 (nvcc V12.6.20)
-- Host compiler: MSVC 2022 Community (`C:\Program Files\Microsoft Visual Studio\2022\Community`).
-  `cl.exe` is not on the default PATH — build from the "x64 Native Tools Command Prompt
-  for VS 2022", or point nvcc at it with `-ccbin "<...>\VC\Tools\MSVC\<ver>\bin\Hostx64\x64"`.
+- Host compiler: MSVC v143 14.41.34120, from the standalone **Build Tools** install
+  (Community has no C++ workload). vcvars:
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`
+  `cl.exe` is not on the default PATH — source vcvars64.bat first, then run nvcc/make.
+- Toolchain verified 2026-05-29: `nvcc -arch=sm_89` compiled + ran a CUDA kernel on the 4060.
 
 Note: the 4060 is Ada `sm_89`, the **same arch as the L40S**, not Turing `sm_75`.
 One `-arch=sm_89` build serves both targets. (CONVENTIONS.md still says sm_75 for the
