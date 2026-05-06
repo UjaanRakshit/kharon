@@ -16,9 +16,15 @@ Note: the 4060 is Ada `sm_89`, the **same arch as the L40S**, not Turing `sm_75`
 One `-arch=sm_89` build serves both targets. (CONVENTIONS.md still says sm_75 for the
 4060 — that line is wrong; flagged, not yet corrected.)
 
-## Cluster (ICE, ice-gpu) — fill on first job
-- GPU: 8× L40S (48 GB, Ada `sm_89`, PCIe Gen4, no NVLink)
-- CUDA: __  NCCL: __  Driver: __
-- Host compiler (gcc on RHEL9): __
-- `module load` lines: __
-- `nvidia-smi topo -m`: __ (which GPU pairs share a PCIe switch?)
+## Cluster (PACE ICE) — confirmed 2026-05-29
+- Login: `login-ice.pace.gatech.edu` (RHEL 9.6). Access via SSH key only (no Duo for
+  key auth); SSH multiplexing is blocked by the server. Account: `coc`.
+- Storage: work under `~/scratch` (`/home/hice1/urakshit3/scratch`); repo at `~/scratch/kharon`.
+- GPU partition: `ice-gpu`, `--gres=gpu:l40s:N` — 8× L40S (48 GB, Ada `sm_89`), sockets S:0-3.
+  (also a100/a40/h100/h200/v100/rtx6000 on the same partition via gres type.)
+- Toolchain modules: `cuda/12.6.1` (matches dev), `gcc/12.3.0`. The cuda module sets
+  `$CUDA_HOME` but does NOT add bin to PATH — prepend it:
+  `module load cuda/12.6.1 gcc/12.3.0 && export PATH=$CUDA_HOME/bin:$PATH`
+- Build on RHEL9 is plain `make` (gcc host, no `-ccbin`/CCBIN). `make ARCH=sm_89`.
+- NCCL: __ (needed M4+)
+- `nvidia-smi topo -m`: __ (pending first L40S job — which GPU pairs share a PCIe switch?)
