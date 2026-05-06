@@ -6,7 +6,7 @@
 
 | # | Milestone | State | Oracle | Benchmark number | Blocker |
 |---|-----------|-------|--------|------------------|---------|
-| 1 | Single-GPU GPT + ckpt | benchmarked | ✓ fwd+bwd+step | 7.1 ms/step, 71.9k tok/s (4060) | L40S number pending cluster |
+| 1 | Single-GPU GPT + ckpt | done | ✓ (4060 + L40S) | 0.64 ms/step 805k tok/s (L40S); 7.1 ms 72k (4060) | — |
 | 2 | FlashAttention + fused | not started | — | — | — |
 | 3 | BF16 + full step | not started | — | — | — |
 | 4 | TP=2 | not started | — | — | — |
@@ -37,6 +37,9 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-29 — M1 validated on PACE ICE L40S (job 5347432, node atl1-1-03-004-27):
+  all four oracles PASS, benchmark 0.64 ms/step / 805k tok/s (vs 7.1 ms / 72k on 4060).
+  M1 DoD fully met. SSH key access + cluster env set up (see ENV.md). Next: M2.
 - 2026-05-29 — M1 complete on 4060: C/CUDA GPT fwd+bwd, AdamW, checkpoint/resume.
   All four oracles pass (forward logits+loss, backward grads, AdamW post-step params,
   bit-exact resume) at FP32 tol. Baseline 7.1 ms/step. Build: nvcc+MSVC via

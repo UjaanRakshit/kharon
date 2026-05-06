@@ -27,4 +27,6 @@ One `-arch=sm_89` build serves both targets. (CONVENTIONS.md still says sm_75 fo
   `module load cuda/12.6.1 gcc/12.3.0 && export PATH=$CUDA_HOME/bin:$PATH`
 - Build on RHEL9 is plain `make` (gcc host, no `-ccbin`/CCBIN). `make ARCH=sm_89`.
 - NCCL: __ (needed M4+)
-- `nvidia-smi topo -m`: __ (pending first L40S job — which GPU pairs share a PCIe switch?)
+- `nvidia-smi topo -m`: 1-GPU job (node atl1-1-03-004-27) shows GPU0 CPU affinity 50-57,
+  NUMA 3. Full 8-GPU pair topology (which pairs share a PCIe switch → TP placement) needs
+  a multi-GPU allocation — capture as an M4 prereq.
