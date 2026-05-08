@@ -55,6 +55,15 @@ int main(int argc, char **argv) {
   printf("forward:\n");
   int ok = cmp("o", o, ref_f32(r, "o"), N);
 
+  float *dout = dev_from(r, "do", N), *dq, *dk, *dv;
+  CK(cudaMalloc((void **)&dq, N * 4)); CK(cudaMalloc((void **)&dk, N * 4)); CK(cudaMalloc((void **)&dv, N * 4));
+  flash_attn_bwd(q, k, v, o, lse, dout, dq, dk, dv, B, H, T, hd, scale);
+  CK(cudaDeviceSynchronize());
+  printf("backward:\n");
+  ok &= cmp("dq", dq, ref_f32(r, "dq"), N);
+  ok &= cmp("dk", dk, ref_f32(r, "dk"), N);
+  ok &= cmp("dv", dv, ref_f32(r, "dv"), N);
+
   free(hbuf);
   ref_free(r);
   printf("%s\n", ok ? "PASS" : "FAIL");
