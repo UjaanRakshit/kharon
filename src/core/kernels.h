@@ -35,6 +35,11 @@ void k_merge_heads(const float *atto, float *out, int B, int T, int H, int hd);
 void k_softmax_causal_fwd(float *att, int rows_bh, int T, float scale);
 void k_gelu_fwd(const float *x, float *y, long n);
 void k_add(const float *a, const float *b, float *c, long n);
+// fused: out = resid + (y + bias[col]); one pass instead of add_bias then add
+void k_bias_residual(const float *y, const float *bias, const float *resid,
+                     float *out, int rows, int N);
+// fused: pre = y + bias[col]; act = gelu(pre); one pass instead of add_bias then gelu
+void k_bias_gelu(const float *y, const float *bias, float *pre, float *act, int rows, int N);
 void k_cross_entropy_fwd(const float *logits, const int *tgt, float *probs,
                          float *rowloss, int rows, int vocab);
 

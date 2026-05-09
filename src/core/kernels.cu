@@ -190,6 +190,30 @@ void k_add(const float *a, const float *b, float *c, long n) {
   add_k<<<ndiv(n, TPB), TPB>>>(a, b, c, n);
 }
 
+__global__ void bias_residual_k(const float *y, const float *bias, const float *resid,
+                                float *out, int N, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = resid[i] + y[i] + bias[i % N];
+}
+void k_bias_residual(const float *y, const float *bias, const float *resid,
+                     float *out, int rows, int N) {
+  long n = (long)rows * N;
+  bias_residual_k<<<ndiv(n, TPB), TPB>>>(y, bias, resid, out, N, n);
+}
+
+__global__ void bias_gelu_k(const float *y, const float *bias, float *pre, float *act,
+                            int N, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float p = y[i] + bias[i % N];
+  pre[i] = p;
+  act[i] = gelu_f(p);
+}
+void k_bias_gelu(const float *y, const float *bias, float *pre, float *act, int rows, int N) {
+  long n = (long)rows * N;
+  bias_gelu_k<<<ndiv(n, TPB), TPB>>>(y, bias, pre, act, N, n);
+}
+
 __global__ void ce_fwd_k(const float *logits, const int *tgt, float *probs,
                          float *rowloss, int vocab) {
   int row = blockIdx.x;

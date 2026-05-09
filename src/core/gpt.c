@@ -192,15 +192,12 @@ float model_forward(Model *m) {
     flash_attn_fwd(A->q, A->k, A->v, A->atto, A->lse, B, H, T, hd, scale);
     k_merge_heads(A->atto, A->atto_m, B, T, H, hd);
     mm_nt(A->atto_m, L->proj_w, A->proj, R, d, d);
-    k_add_bias(A->proj, L->proj_b, R, d);
-    k_add(x, A->proj, A->res1, R * d);
+    k_bias_residual(A->proj, L->proj_b, x, A->res1, R, d);
     k_layernorm_fwd(A->res1, L->ln2_w, L->ln2_b, A->ln2, A->ln2_mean, A->ln2_rstd, R, d);
     mm_nt(A->ln2, L->fc_w, A->fc, R, ff, d);
-    k_add_bias(A->fc, L->fc_b, R, ff);
-    k_gelu_fwd(A->fc, A->gelu, R * ff);
+    k_bias_gelu(A->fc, L->fc_b, A->fc, A->gelu, R, ff);
     mm_nt(A->gelu, L->fcproj_w, A->fcproj, R, d, ff);
-    k_add_bias(A->fcproj, L->fcproj_b, R, d);
-    k_add(A->res1, A->fcproj, A->res2, R * d);
+    k_bias_residual(A->fcproj, L->fcproj_b, A->res1, A->res2, R, d);
     x = A->res2;
   }
   k_layernorm_fwd(x, w->lnf_w, w->lnf_b, a->lnf, a->lnf_mean, a->lnf_rstd, R, d);
