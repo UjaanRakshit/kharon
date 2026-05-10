@@ -31,7 +31,7 @@ OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
 TESTS := test_loadref test_forward test_backward test_step test_resume test_flash
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
-BENCH := bench_step
+BENCH := bench_step bench_fused bench_flash
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 
 .PHONY: all tests bench clean
