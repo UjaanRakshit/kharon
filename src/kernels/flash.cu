@@ -2,47 +2,53 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Tile sizes tuned for sm_89. Static shared = (2*BR + 2*BC)*MAXHD*4 bytes; with
-// these values that is 32 KB, under the 48 KB default. hd<=MAXHD (asserted by the
-// host launcher). Larger head dims (1B model, hd=128) will move to dynamic shared.
-#define BR 32
-#define BC 32
-#define MAXHD 64
+// Warp-per-query-row forward. A warp owns one query row; its 32 lanes split the
+// head dim (each lane holds hd/32 output elements in registers), dot-products
+// reduce via shuffles. K/V tiles are staged in shared and reused by all warps.
+#define F_WPB 8         // warps (query rows) per block
+#define F_BC 32         // key tile
+#define F_MAXHD 128
+#define F_MAXELE (F_MAXHD / 32)
 
-// One block per (query tile, b*h). One thread per query row in the tile.
+__device__ __forceinline__ float warp_sum(float v) {
+  for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+  return __shfl_sync(0xffffffffu, v, 0);
+}
+
 __global__ void flash_fwd_k(const float *q, const float *k, const float *v,
                             float *o, float *lse, int T, int hd, float scale) {
-  __shared__ float Qs[BR][MAXHD], Os[BR][MAXHD], Ks[BC][MAXHD], Vs[BC][MAXHD];
-  int t = threadIdx.x;
-  int qtile = blockIdx.x, bh = blockIdx.y;
-  int qr = qtile * BR + t;                 // global query row this thread owns
-  const float *base = q + (long)bh * T * hd;
-  const float *kbase = k + (long)bh * T * hd, *vbase = v + (long)bh * T * hd;
+  __shared__ float Ks[F_BC][F_MAXHD], Vs[F_BC][F_MAXHD];
+  int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  int qr = blockIdx.x * F_WPB + warp, bh = blockIdx.y;
+  long obase = (long)bh * T * hd;
+  const float *qb = q + obase, *kb = k + obase, *vb = v + obase;
+  int ele = (hd + 31) / 32;
 
-  if (qr < T)
-    for (int e = 0; e < hd; e++) { Qs[t][e] = base[(long)qr * hd + e]; Os[t][e] = 0.f; }
+  float qreg[F_MAXELE], oreg[F_MAXELE];
+  for (int c = 0; c < ele; c++) {
+    int e = lane + c * 32;
+    qreg[c] = (qr < T && e < hd) ? qb[(long)qr * hd + e] : 0.f;
+    oreg[c] = 0.f;
+  }
   float m = -INFINITY, l = 0.f;
-  __syncthreads();
-
-  int maxqr = qtile * BR + BR - 1;         // causal: skip key tiles fully in the future
-  for (int kt = 0; kt * BC <= maxqr && kt * BC < T; kt++) {
-    for (int idx = t; idx < BC * hd; idx += BR) {
-      int c = idx / hd, e = idx % hd, kc = kt * BC + c;
-      Ks[c][e] = kc < T ? kbase[(long)kc * hd + e] : 0.f;
-      Vs[c][e] = kc < T ? vbase[(long)kc * hd + e] : 0.f;
+  int maxqr = blockIdx.x * F_WPB + F_WPB - 1;
+  for (int kt = 0; kt * F_BC <= maxqr && kt * F_BC < T; kt++) {
+    for (int idx = threadIdx.x; idx < F_BC * hd; idx += blockDim.x) {
+      int cc = idx / hd, e = idx % hd, kc = kt * F_BC + cc;
+      Ks[cc][e] = kc < T ? kb[(long)kc * hd + e] : 0.f;
+      Vs[cc][e] = kc < T ? vb[(long)kc * hd + e] : 0.f;
     }
     __syncthreads();
     if (qr < T) {
-      for (int c = 0; c < BC; c++) {
-        int kc = kt * BC + c;
-        if (kc >= T || kc > qr) break;     // causal + bounds (cols are in order)
-        float s = 0.f;
-        for (int e = 0; e < hd; e++) s += Qs[t][e] * Ks[c][e];
-        s *= scale;
-        float m_new = fmaxf(m, s);
-        float corr = expf(m - m_new), p = expf(s - m_new);
+      for (int cc = 0; cc < F_BC; cc++) {
+        int kc = kt * F_BC + cc;
+        if (kc >= T || kc > qr) break;
+        float part = 0.f;
+        for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) part += qreg[c] * Ks[cc][e]; }
+        float s = warp_sum(part) * scale;
+        float m_new = fmaxf(m, s), corr = expf(m - m_new), p = expf(s - m_new);
         l = l * corr + p;
-        for (int e = 0; e < hd; e++) Os[t][e] = Os[t][e] * corr + p * Vs[c][e];
+        for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) oreg[c] = oreg[c] * corr + p * Vs[cc][e]; }
         m = m_new;
       }
     }
@@ -50,15 +56,15 @@ __global__ void flash_fwd_k(const float *q, const float *k, const float *v,
   }
   if (qr < T) {
     float inv = 1.f / l;
-    for (int e = 0; e < hd; e++) o[(long)bh * T * hd + (long)qr * hd + e] = Os[t][e] * inv;
-    lse[(long)bh * T + qr] = m + logf(l);
+    for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) o[obase + (long)qr * hd + e] = oreg[c] * inv; }
+    if (lane == 0) lse[(long)bh * T + qr] = m + logf(l);
   }
 }
 
 void flash_attn_fwd(const float *q, const float *k, const float *v,
                     float *o, float *lse, int B, int H, int T, int hd, float scale) {
-  dim3 grid((T + BR - 1) / BR, B * H);
-  flash_fwd_k<<<grid, BR>>>(q, k, v, o, lse, T, hd, scale);
+  dim3 grid((T + F_WPB - 1) / F_WPB, B * H);
+  flash_fwd_k<<<grid, F_WPB * 32>>>(q, k, v, o, lse, T, hd, scale);
 }
 
 // delta D[i] = sum_e dO[i,e] * O[i,e]  (per query row), needed by the backward.
@@ -71,98 +77,106 @@ __global__ void flash_delta_k(const float *dout, const float *o, float *D, int h
   D[row] = s;
 }
 
-// dQ: one block per (query tile, bh), one thread per query row. Loops key tiles,
-// recomputes P = exp(scale*q.k - lse), dS = P*(dO.v - D), accumulates dQ. No race.
+// dQ: warp per query row. Loops key tiles, recomputes P = exp(scale*q.k - lse),
+// dS = P*(dO.v - D), accumulates dQ in registers (hd split across lanes). No race.
 __global__ void flash_dq_k(const float *q, const float *k, const float *v,
                            const float *dout, const float *lse, const float *D,
                            float *dq, int T, int hd, float scale) {
-  __shared__ float Qs[BR][MAXHD], dOs[BR][MAXHD], Ks[BC][MAXHD], Vs[BC][MAXHD];
-  int t = threadIdx.x, qtile = blockIdx.x, bh = blockIdx.y, qr = qtile * BR + t;
+  __shared__ float Ks[F_BC][F_MAXHD], Vs[F_BC][F_MAXHD];
+  int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  int qr = blockIdx.x * F_WPB + warp, bh = blockIdx.y;
   long base = (long)bh * T * hd;
-  float acc[MAXHD];
-  for (int e = 0; e < hd; e++) acc[e] = 0.f;
-  float Li = 0, Di = 0;
-  if (qr < T) {
-    for (int e = 0; e < hd; e++) { Qs[t][e] = q[base + (long)qr * hd + e]; dOs[t][e] = dout[base + (long)qr * hd + e]; }
-    Li = lse[(long)bh * T + qr]; Di = D[(long)bh * T + qr];
+  int ele = (hd + 31) / 32;
+  float qreg[F_MAXELE], doreg[F_MAXELE], acc[F_MAXELE];
+  for (int c = 0; c < ele; c++) {
+    int e = lane + c * 32;
+    qreg[c] = (qr < T && e < hd) ? q[base + (long)qr * hd + e] : 0.f;
+    doreg[c] = (qr < T && e < hd) ? dout[base + (long)qr * hd + e] : 0.f;
+    acc[c] = 0.f;
   }
-  __syncthreads();
-  int maxqr = qtile * BR + BR - 1;
-  for (int kt = 0; kt * BC <= maxqr && kt * BC < T; kt++) {
-    for (int idx = t; idx < BC * hd; idx += BR) {
-      int c = idx / hd, e = idx % hd, kc = kt * BC + c;
-      Ks[c][e] = kc < T ? k[base + (long)kc * hd + e] : 0.f;
-      Vs[c][e] = kc < T ? v[base + (long)kc * hd + e] : 0.f;
+  float Li = (qr < T) ? lse[(long)bh * T + qr] : 0.f, Di = (qr < T) ? D[(long)bh * T + qr] : 0.f;
+  int maxqr = blockIdx.x * F_WPB + F_WPB - 1;
+  for (int kt = 0; kt * F_BC <= maxqr && kt * F_BC < T; kt++) {
+    for (int idx = threadIdx.x; idx < F_BC * hd; idx += blockDim.x) {
+      int cc = idx / hd, e = idx % hd, kc = kt * F_BC + cc;
+      Ks[cc][e] = kc < T ? k[base + (long)kc * hd + e] : 0.f;
+      Vs[cc][e] = kc < T ? v[base + (long)kc * hd + e] : 0.f;
     }
     __syncthreads();
     if (qr < T) {
-      for (int c = 0; c < BC; c++) {
-        int kc = kt * BC + c;
+      for (int cc = 0; cc < F_BC; cc++) {
+        int kc = kt * F_BC + cc;
         if (kc >= T || kc > qr) break;
-        float s = 0.f;
-        for (int e = 0; e < hd; e++) s += Qs[t][e] * Ks[c][e];
-        float P = expf(s * scale - Li);
-        float dP = 0.f;
-        for (int e = 0; e < hd; e++) dP += dOs[t][e] * Vs[c][e];
-        float dS = P * (dP - Di);
-        for (int e = 0; e < hd; e++) acc[e] += scale * dS * Ks[c][e];
+        float sp = 0.f, dpp = 0.f;
+        for (int c = 0; c < ele; c++) {
+          int e = lane + c * 32;
+          if (e < hd) { sp += qreg[c] * Ks[cc][e]; dpp += doreg[c] * Vs[cc][e]; }
+        }
+        float P = expf(warp_sum(sp) * scale - Li);
+        float dS = P * (warp_sum(dpp) - Di);
+        for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) acc[c] += scale * dS * Ks[cc][e]; }
       }
     }
     __syncthreads();
   }
   if (qr < T)
-    for (int e = 0; e < hd; e++) dq[base + (long)qr * hd + e] = acc[e];
+    for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) dq[base + (long)qr * hd + e] = acc[c]; }
 }
 
-// dK,dV: one block per (key tile, bh), one thread per key row. Loops query tiles
-// (causal i>=j), accumulates dK,dV in registers. No race.
+// dK,dV: warp per key row. Loops query tiles (causal i>=j), accumulates dK,dV in
+// registers (hd split across lanes). No race.
 __global__ void flash_dkv_k(const float *q, const float *k, const float *v,
                             const float *dout, const float *lse, const float *D,
                             float *dk, float *dv, int T, int hd, float scale) {
-  __shared__ float Ks[BC][MAXHD], Vs[BC][MAXHD], Qs[BR][MAXHD], dOs[BR][MAXHD];
-  __shared__ float Ls[BR], Ds[BR];
-  int t = threadIdx.x, ktile = blockIdx.x, bh = blockIdx.y, kr = ktile * BC + t;
+  __shared__ float Qs[F_BC][F_MAXHD], dOs[F_BC][F_MAXHD], Ls[F_BC], Ds[F_BC];
+  int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  int kr = blockIdx.x * F_WPB + warp, bh = blockIdx.y;
   long base = (long)bh * T * hd;
-  float dKa[MAXHD], dVa[MAXHD];
-  for (int e = 0; e < hd; e++) { dKa[e] = 0.f; dVa[e] = 0.f; }
-  if (kr < T)
-    for (int e = 0; e < hd; e++) { Ks[t][e] = k[base + (long)kr * hd + e]; Vs[t][e] = v[base + (long)kr * hd + e]; }
-  __syncthreads();
-  int qt0 = (ktile * BC) / BR;             // first query tile that can be causal
-  int nqt = (T + BR - 1) / BR;
+  int ele = (hd + 31) / 32;
+  float kreg[F_MAXELE], vreg[F_MAXELE], dka[F_MAXELE], dva[F_MAXELE];
+  for (int c = 0; c < ele; c++) {
+    int e = lane + c * 32;
+    kreg[c] = (kr < T && e < hd) ? k[base + (long)kr * hd + e] : 0.f;
+    vreg[c] = (kr < T && e < hd) ? v[base + (long)kr * hd + e] : 0.f;
+    dka[c] = 0.f; dva[c] = 0.f;
+  }
+  int qt0 = (blockIdx.x * F_WPB) / F_BC, nqt = (T + F_BC - 1) / F_BC;
   for (int qt = qt0; qt < nqt; qt++) {
-    for (int idx = t; idx < BR * hd; idx += BC) {
-      int rr = idx / hd, e = idx % hd, i = qt * BR + rr;
+    for (int idx = threadIdx.x; idx < F_BC * hd; idx += blockDim.x) {
+      int rr = idx / hd, e = idx % hd, i = qt * F_BC + rr;
       Qs[rr][e] = i < T ? q[base + (long)i * hd + e] : 0.f;
       dOs[rr][e] = i < T ? dout[base + (long)i * hd + e] : 0.f;
     }
-    for (int rr = t; rr < BR; rr += BC) {
-      int i = qt * BR + rr;
+    for (int rr = threadIdx.x; rr < F_BC; rr += blockDim.x) {
+      int i = qt * F_BC + rr;
       Ls[rr] = i < T ? lse[(long)bh * T + i] : 0.f;
       Ds[rr] = i < T ? D[(long)bh * T + i] : 0.f;
     }
     __syncthreads();
     if (kr < T) {
-      for (int rr = 0; rr < BR; rr++) {
-        int i = qt * BR + rr;
+      for (int rr = 0; rr < F_BC; rr++) {
+        int i = qt * F_BC + rr;
         if (i >= T) break;
-        if (i < kr) continue;              // causal: key kr only sees queries i>=kr
-        float s = 0.f;
-        for (int e = 0; e < hd; e++) s += Qs[rr][e] * Ks[t][e];
-        float P = expf(s * scale - Ls[rr]);
-        for (int e = 0; e < hd; e++) dVa[e] += P * dOs[rr][e];
-        float dP = 0.f;
-        for (int e = 0; e < hd; e++) dP += dOs[rr][e] * Vs[t][e];
-        float dS = P * (dP - Ds[rr]);
-        for (int e = 0; e < hd; e++) dKa[e] += scale * dS * Qs[rr][e];
+        if (i < kr) continue;
+        float sp = 0.f, dpp = 0.f;
+        for (int c = 0; c < ele; c++) {
+          int e = lane + c * 32;
+          if (e < hd) { sp += Qs[rr][e] * kreg[c]; dpp += dOs[rr][e] * vreg[c]; }
+        }
+        float P = expf(warp_sum(sp) * scale - Ls[rr]);
+        float dS = P * (warp_sum(dpp) - Ds[rr]);
+        for (int c = 0; c < ele; c++) {
+          int e = lane + c * 32;
+          if (e < hd) { dva[c] += P * dOs[rr][e]; dka[c] += scale * dS * Qs[rr][e]; }
+        }
       }
     }
     __syncthreads();
   }
   if (kr < T)
-    for (int e = 0; e < hd; e++) {
-      dk[base + (long)kr * hd + e] = dKa[e];
-      dv[base + (long)kr * hd + e] = dVa[e];
+    for (int c = 0; c < ele; c++) {
+      int e = lane + c * 32;
+      if (e < hd) { dk[base + (long)kr * hd + e] = dka[c]; dv[base + (long)kr * hd + e] = dva[c]; }
     }
 }
 
@@ -174,9 +188,8 @@ void flash_attn_bwd(const float *q, const float *k, const float *v,
   float *D;
   cudaMalloc((void **)&D, n * 4);
   flash_delta_k<<<(int)((n + 127) / 128), 128>>>(dout, o, D, hd, n);
-  dim3 gq((T + BR - 1) / BR, B * H);
-  flash_dq_k<<<gq, BR>>>(q, k, v, dout, lse, D, dq, T, hd, scale);
-  dim3 gk((T + BC - 1) / BC, B * H);
-  flash_dkv_k<<<gk, BC>>>(q, k, v, dout, lse, D, dk, dv, T, hd, scale);
+  dim3 g((T + F_WPB - 1) / F_WPB, B * H);
+  flash_dq_k<<<g, F_WPB * 32>>>(q, k, v, dout, lse, D, dq, T, hd, scale);
+  flash_dkv_k<<<g, F_WPB * 32>>>(q, k, v, dout, lse, D, dk, dv, T, hd, scale);
   cudaFree(D);
 }
