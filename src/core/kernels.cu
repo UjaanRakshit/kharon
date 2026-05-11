@@ -2,6 +2,7 @@
 #include "kharon.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cuda_bf16.h>
 #include <math.h>
 
 static cublasHandle_t g_h;
@@ -19,6 +20,13 @@ void mm_nt(const float *A, const float *B, float *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
   CUBLAS_CK(cublasSgemm(g_h, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K,
                         &a, B, K, A, K, &b, C, N));
+}
+// Same row-major recipe as mm_nt, bf16 inputs + fp32 accum -> tensor cores on Ada.
+void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K) {
+  const float a = 1.f, b = 0.f;
+  CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &a,
+                         B, CUDA_R_16BF, K, A, CUDA_R_16BF, K, &b,
+                         C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
 void mm_nn(const float *A, const float *B, float *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
@@ -405,4 +413,19 @@ __global__ void adamw_k(float *p, const float *g, float *m, float *v, long n,
 void k_adamw(float *p, const float *g, float *m, float *v, long n,
              float lr, float b1, float b2, float eps, float wd, float bc1, float bc2) {
   adamw_k<<<ndiv(n, TPB), TPB>>>(p, g, m, v, n, lr, b1, b2, eps, wd, bc1, bc2);
+}
+
+__global__ void f2b_k(const float *in, __nv_bfloat16 *out, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = __float2bfloat16(in[i]);
+}
+void k_f2b(const float *in, void *out, long n) {
+  f2b_k<<<ndiv(n, TPB), TPB>>>(in, (__nv_bfloat16 *)out, n);
+}
+__global__ void b2f_k(const __nv_bfloat16 *in, float *out, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = __bfloat162float(in[i]);
+}
+void k_b2f(const void *in, float *out, long n) {
+  b2f_k<<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)in, out, n);
 }

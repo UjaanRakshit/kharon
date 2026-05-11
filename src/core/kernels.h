@@ -10,6 +10,12 @@ void gemm_init(void);
 void gemm_destroy(void);
 // C[M,N] = A[M,K] @ B[N,K]^T
 void mm_nt(const float *A, const float *B, float *C, int M, int N, int K);
+// BF16 tensor-core GEMM: A,B are bf16 (void*), C fp32, FP32 accumulation.
+// C[M,N] = A[M,K] @ B[N,K]^T
+void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K);
+// dtype casts (bf16 buffers passed as void*)
+void k_f2b(const float *in, void *out, long n);
+void k_b2f(const void *in, float *out, long n);
 // C[M,N] = A[M,K] @ B[K,N]
 void mm_nn(const float *A, const float *B, float *C, int M, int N, int K);
 // C[M,N] = A[K,M]^T @ B[K,N]
