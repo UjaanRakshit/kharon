@@ -32,7 +32,8 @@ typedef struct {
   float *ln1_mean, *ln1_rstd, *ln1;   // ln1: [BT,d]
   float *qkv;                         // [BT,3d]
   float *q, *k, *v;                   // [B,H,T,hd]
-  float *att;                         // [B,H,T,T] softmax probs
+  float *att;                         // [B,H,T,T] (naive path; unused once FA is in)
+  float *lse;                         // [B,H,T] FlashAttention log-sum-exp
   float *atto;                        // [B,H,T,hd] attention output
   float *atto_m;                      // [BT,d] heads merged
   float *proj;                        // [BT,d]

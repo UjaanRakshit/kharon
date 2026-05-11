@@ -1,5 +1,6 @@
 #include "model.h"
 #include "kernels.h"
+#include "flash.h"
 #include "kharon.h"
 #include <string.h>
 #include <math.h>
@@ -42,6 +43,7 @@ static void layout_acts(Arena *ar, Config c, Acts *a) {
     A->q = (float *)arena_alloc(ar, R * d * 4); A->k = (float *)arena_alloc(ar, R * d * 4);
     A->v = (float *)arena_alloc(ar, R * d * 4);
     A->att = (float *)arena_alloc(ar, BHT2 * 4);
+    A->lse = (float *)arena_alloc(ar, (long)c.batch * H * T * 4);
     A->atto = (float *)arena_alloc(ar, R * d * 4);
     A->atto_m = (float *)arena_alloc(ar, R * d * 4);
     A->proj = (float *)arena_alloc(ar, R * d * 4);
@@ -89,7 +91,7 @@ static long weight_bytes(Config c) {
 static long act_bytes(Config c) {
   int d = c.d_model, H = c.n_head, V = c.vocab, ff = 4 * d;
   long R = (long)c.batch * c.seq, T = c.seq;
-  long per = 2 * R + R * d + R * 3 * d + 3 * R * d + (long)c.batch * H * T * T
+  long per = 2 * R + R * d + R * 3 * d + 3 * R * d + (long)c.batch * H * T * T + (long)c.batch * H * T
            + R * d + R * d + R * d + R * d + 2 * R + R * d + R * ff + R * ff + R * d + R * d;
   return (R * d + c.n_layer * per + 2 * R + R * d + R * V + R * V + R) * 4;
 }
@@ -187,20 +189,15 @@ float model_forward(Model *m) {
     mm_nt(A->ln1, L->qkv_w, A->qkv, R, 3 * d, d);
     k_add_bias(A->qkv, L->qkv_b, R, 3 * d);
     k_split_heads(A->qkv, A->q, A->k, A->v, B, T, H, hd);
-    mm_nt_batched(A->q, A->k, A->att, T, T, hd, (long)T * hd, (long)T * hd, (long)T * T, B * H);
-    k_softmax_causal_fwd(A->att, B * H * T, T, scale);
-    mm_nn_batched(A->att, A->v, A->atto, T, hd, T, (long)T * T, (long)T * hd, (long)T * hd, B * H);
+    flash_attn_fwd(A->q, A->k, A->v, A->atto, A->lse, B, H, T, hd, scale);
     k_merge_heads(A->atto, A->atto_m, B, T, H, hd);
     mm_nt(A->atto_m, L->proj_w, A->proj, R, d, d);
-    k_add_bias(A->proj, L->proj_b, R, d);
-    k_add(x, A->proj, A->res1, R * d);
+    k_bias_residual(A->proj, L->proj_b, x, A->res1, R, d);
     k_layernorm_fwd(A->res1, L->ln2_w, L->ln2_b, A->ln2, A->ln2_mean, A->ln2_rstd, R, d);
     mm_nt(A->ln2, L->fc_w, A->fc, R, ff, d);
-    k_add_bias(A->fc, L->fc_b, R, ff);
-    k_gelu_fwd(A->fc, A->gelu, R * ff);
+    k_bias_gelu(A->fc, L->fc_b, A->fc, A->gelu, R, ff);
     mm_nt(A->gelu, L->fcproj_w, A->fcproj, R, d, ff);
-    k_add_bias(A->fcproj, L->fcproj_b, R, d);
-    k_add(A->res1, A->fcproj, A->res2, R * d);
+    k_bias_residual(A->fcproj, L->fcproj_b, A->res1, A->res2, R, d);
     x = A->res2;
   }
   k_layernorm_fwd(x, w->lnf_w, w->lnf_b, a->lnf, a->lnf_mean, a->lnf_rstd, R, d);
@@ -224,7 +221,6 @@ void model_backward(Model *m) {
   Config c = m->cfg;
   int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d, T = c.seq, B = c.batch;
   long R = (long)B * T, RD = R * d;
-  long sTT = (long)T * T, sThd = (long)T * hd;
   float scale = 1.f / sqrtf((float)hd);
   Weights *w = &m->w, *g = &m->g;
   Acts *a = &m->a;
@@ -272,16 +268,8 @@ void model_backward(Model *m) {
     mm_tn(s->proj, A->atto_m, gL->proj_w, d, d, R);
     mm_nn(s->proj, L->proj_w, s->atto_m, R, d, d);
     // atto_m = merge(atto)
-    k_unmerge_heads(s->atto_m, s->atto, B, T, H, hd);
-    // atto = att @ v
-    mm_nt_batched(s->atto, A->v, s->att, T, T, hd, sThd, sThd, sTT, B * H);
-    mm_tn_batched(A->att, s->atto, s->v, T, hd, T, sTT, sThd, sThd, B * H);
-    // softmax (scale folded)
-    k_softmax_causal_bwd(A->att, s->att, s->scores, B * H * T, T, scale);
-    // scores = q @ k^T
-    mm_nn_batched(s->scores, A->k, s->q, T, hd, T, sTT, sThd, sThd, B * H);
-    mm_tn_batched(s->scores, A->q, s->k, T, hd, T, sTT, sThd, sThd, B * H);
-    // qkv split -> combine
+    k_unmerge_heads(s->atto_m, s->atto, B, T, H, hd);   // s->atto = grad of attn output
+    flash_attn_bwd(A->q, A->k, A->v, A->atto, A->lse, s->atto, s->q, s->k, s->v, B, H, T, hd, scale);
     k_combine_qkv(s->q, s->k, s->v, s->qkv, B, T, H, hd);
     // qkv = ln1 @ qkv_w^T + b
     k_colsum(s->qkv, gL->qkv_b, R, 3 * d);

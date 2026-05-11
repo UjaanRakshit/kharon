@@ -1,7 +1,7 @@
 NVCC  ?= nvcc
 ARCH  ?= sm_89
 BUILD ?= build
-INC   := -Isrc/core
+INC   := -Isrc/core -Isrc/kernels
 
 ifeq ($(OS),Windows_NT)
   CSTD := -Xcompiler /std:c11
@@ -26,11 +26,12 @@ endif
 
 CORE_C  := arena refio gpt adamw ckpt
 CORE_CU := kernels
-OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU)))
+K_CU    := flash
+OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
-TESTS := test_loadref test_forward test_backward test_step test_resume
+TESTS := test_loadref test_forward test_backward test_step test_resume test_flash
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
-BENCH := bench_step
+BENCH := bench_step bench_fused bench_flash
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 
 .PHONY: all tests bench clean
@@ -42,6 +43,9 @@ $(BUILD)/%.o: src/core/%.c | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) -c $< -o $@
 
 $(BUILD)/%.o: src/core/%.cu | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: src/kernels/%.cu | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(BUILD)/%.exe: tests/%.c $(OBJ) | $(BUILD)
