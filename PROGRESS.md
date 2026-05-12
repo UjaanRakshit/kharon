@@ -33,6 +33,11 @@ States: not started / in progress / oracle-passing / benchmarked / done
   per-key warp-shuffle reduction, not compute- or bandwidth-bound. Closing to >1x needs
   a blocked-matmul formulation or (the real lever) BF16 tensor cores in M3.
 - Fused elementwise (M2): 4060 1.36-1.71x; L40S 0.96x (48MB L2 absorbs the intermediate).
+- BF16 tensor-core GEMM (M3 lever, 4060, cublasGemmEx): 3.3x vs fp32 cuBLAS,
+  rel-frobenius 2.4e-3 (within bf16 tol). Resolves the M2 "needs tensor cores" gap.
+- M3 memory budget: bf16 mixed = 18 B/param (fp32 master 4 + bf16 weight 2 + fp32 grad 4
+  + adamw m,v 8). 1.3B target -> ~23.6GB params/opt + acts; borderline on 48GB, so M3 uses
+  a proxy (~d=1024 x 12L ~200M params ~3.6GB) to prove the loop; full 1B waits for M4-M7.
 - FlashAttention vs official: __ (deferred to M3 — official FA is BF16/tensor-core)
 - Custom GEMM vs cuBLAS (shape __): __
 - Bubble fraction @ m=__ microbatches: __
