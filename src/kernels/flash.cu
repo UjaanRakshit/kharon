@@ -1,6 +1,14 @@
 #include "flash.h"
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
 #include <math.h>
+
+template <class T> __device__ __forceinline__ float toF(T x);
+template <> __device__ __forceinline__ float toF<float>(float x) { return x; }
+template <> __device__ __forceinline__ float toF<__nv_bfloat16>(__nv_bfloat16 x) { return __bfloat162float(x); }
+template <class T> __device__ __forceinline__ T fromF(float x);
+template <> __device__ __forceinline__ float fromF<float>(float x) { return x; }
+template <> __device__ __forceinline__ __nv_bfloat16 fromF<__nv_bfloat16>(float x) { return __float2bfloat16(x); }
 
 // Warp-per-query-row forward. A warp owns one query row; its 32 lanes split the
 // head dim (each lane holds hd/32 output elements in registers), dot-products
@@ -15,19 +23,20 @@ __device__ __forceinline__ float warp_sum(float v) {
   return __shfl_sync(0xffffffffu, v, 0);
 }
 
-__global__ void flash_fwd_k(const float *q, const float *k, const float *v,
-                            float *o, float *lse, int T, int hd, float scale) {
+template <class ST>
+__global__ void flash_fwd_k(const ST *q, const ST *k, const ST *v,
+                            ST *o, float *lse, int T, int hd, float scale) {
   __shared__ float Ks[F_BC][F_MAXHD], Vs[F_BC][F_MAXHD];
   int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   int qr = blockIdx.x * F_WPB + warp, bh = blockIdx.y;
   long obase = (long)bh * T * hd;
-  const float *qb = q + obase, *kb = k + obase, *vb = v + obase;
+  const ST *qb = q + obase, *kb = k + obase, *vb = v + obase;
   int ele = (hd + 31) / 32;
 
   float qreg[F_MAXELE], oreg[F_MAXELE];
   for (int c = 0; c < ele; c++) {
     int e = lane + c * 32;
-    qreg[c] = (qr < T && e < hd) ? qb[(long)qr * hd + e] : 0.f;
+    qreg[c] = (qr < T && e < hd) ? toF(qb[(long)qr * hd + e]) : 0.f;
     oreg[c] = 0.f;
   }
   float m = -INFINITY, l = 0.f;
@@ -35,8 +44,8 @@ __global__ void flash_fwd_k(const float *q, const float *k, const float *v,
   for (int kt = 0; kt * F_BC <= maxqr && kt * F_BC < T; kt++) {
     for (int idx = threadIdx.x; idx < F_BC * hd; idx += blockDim.x) {
       int cc = idx / hd, e = idx % hd, kc = kt * F_BC + cc;
-      Ks[cc][e] = kc < T ? kb[(long)kc * hd + e] : 0.f;
-      Vs[cc][e] = kc < T ? vb[(long)kc * hd + e] : 0.f;
+      Ks[cc][e] = kc < T ? toF(kb[(long)kc * hd + e]) : 0.f;
+      Vs[cc][e] = kc < T ? toF(vb[(long)kc * hd + e]) : 0.f;
     }
     __syncthreads();
     if (qr < T) {
@@ -56,7 +65,7 @@ __global__ void flash_fwd_k(const float *q, const float *k, const float *v,
   }
   if (qr < T) {
     float inv = 1.f / l;
-    for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) o[obase + (long)qr * hd + e] = oreg[c] * inv; }
+    for (int c = 0; c < ele; c++) { int e = lane + c * 32; if (e < hd) o[obase + (long)qr * hd + e] = fromF<ST>(oreg[c] * inv); }
     if (lane == 0) lse[(long)bh * T + qr] = m + logf(l);
   }
 }
@@ -64,7 +73,13 @@ __global__ void flash_fwd_k(const float *q, const float *k, const float *v,
 void flash_attn_fwd(const float *q, const float *k, const float *v,
                     float *o, float *lse, int B, int H, int T, int hd, float scale) {
   dim3 grid((T + F_WPB - 1) / F_WPB, B * H);
-  flash_fwd_k<<<grid, F_WPB * 32>>>(q, k, v, o, lse, T, hd, scale);
+  flash_fwd_k<float><<<grid, F_WPB * 32>>>(q, k, v, o, lse, T, hd, scale);
+}
+void flash_attn_fwd_bf(const void *q, const void *k, const void *v,
+                       void *o, float *lse, int B, int H, int T, int hd, float scale) {
+  dim3 grid((T + F_WPB - 1) / F_WPB, B * H);
+  flash_fwd_k<__nv_bfloat16><<<grid, F_WPB * 32>>>((const __nv_bfloat16 *)q,
+      (const __nv_bfloat16 *)k, (const __nv_bfloat16 *)v, (__nv_bfloat16 *)o, lse, T, hd, scale);
 }
 
 // delta D[i] = sum_e dO[i,e] * O[i,e]  (per query row), needed by the backward.

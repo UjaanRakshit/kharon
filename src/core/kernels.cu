@@ -28,6 +28,13 @@ void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K) {
                          B, CUDA_R_16BF, K, A, CUDA_R_16BF, K, &b,
                          C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
+// bf16 in/out (fp32 accum) — forward activation GEMMs stay in bf16 storage.
+void mm_nt_bf16o(const void *A, const void *B, void *C, int M, int N, int K) {
+  const float a = 1.f, b = 0.f;
+  CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &a,
+                         B, CUDA_R_16BF, K, A, CUDA_R_16BF, K, &b,
+                         C, CUDA_R_16BF, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+}
 void mm_nn(const float *A, const float *B, float *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
   CUBLAS_CK(cublasSgemm(g_h, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
@@ -151,7 +158,8 @@ void k_add_bias(float *y, const float *b, int rows, int N) {
   add_bias_k<<<ndiv(n, TPB), TPB>>>(y, b, N, n);
 }
 
-__global__ void split_heads_k(const float *qkv, float *q, float *k, float *v,
+template <class ST>
+__global__ void split_heads_k(const ST *qkv, ST *q, ST *k, ST *v,
                               int T, int H, int hd, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
@@ -165,10 +173,16 @@ __global__ void split_heads_k(const float *qkv, float *q, float *k, float *v,
 void k_split_heads(const float *qkv, float *q, float *k, float *v,
                    int B, int T, int H, int hd) {
   long n = (long)B * H * T * hd;
-  split_heads_k<<<ndiv(n, TPB), TPB>>>(qkv, q, k, v, T, H, hd, n);
+  split_heads_k<float><<<ndiv(n, TPB), TPB>>>(qkv, q, k, v, T, H, hd, n);
+}
+void k_split_heads_bf(const void *qkv, void *q, void *k, void *v, int B, int T, int H, int hd) {
+  long n = (long)B * H * T * hd;
+  split_heads_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)qkv,
+      (__nv_bfloat16 *)q, (__nv_bfloat16 *)k, (__nv_bfloat16 *)v, T, H, hd, n);
 }
 
-__global__ void merge_heads_k(const float *atto, float *out, int T, int H, int hd, long n) {
+template <class ST>
+__global__ void merge_heads_k(const ST *atto, ST *out, int T, int H, int hd, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int d = H * hd;
@@ -177,7 +191,12 @@ __global__ void merge_heads_k(const float *atto, float *out, int T, int H, int h
 }
 void k_merge_heads(const float *atto, float *out, int B, int T, int H, int hd) {
   long n = (long)B * H * T * hd;
-  merge_heads_k<<<ndiv(n, TPB), TPB>>>(atto, out, T, H, hd, n);
+  merge_heads_k<float><<<ndiv(n, TPB), TPB>>>(atto, out, T, H, hd, n);
+}
+void k_merge_heads_bf(const void *atto, void *out, int B, int T, int H, int hd) {
+  long n = (long)B * H * T * hd;
+  merge_heads_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)atto,
+      (__nv_bfloat16 *)out, T, H, hd, n);
 }
 
 __global__ void softmax_causal_fwd_k(float *att, int T, float scale) {
@@ -220,48 +239,66 @@ void k_add(const float *a, const float *b, float *c, long n) {
   add_k<<<ndiv(n, TPB), TPB>>>(a, b, c, n);
 }
 
-__global__ void bias_residual_k(const float *y, const float *bias, const float *resid,
-                                float *out, int N, long n) {
+template <class ST>
+__global__ void bias_residual_k(const ST *y, const ST *bias, const ST *resid,
+                                ST *out, int N, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) out[i] = resid[i] + y[i] + bias[i % N];
+  if (i < n) out[i] = fromF<ST>(toF(resid[i]) + toF(y[i]) + toF(bias[i % N]));
 }
 void k_bias_residual(const float *y, const float *bias, const float *resid,
                      float *out, int rows, int N) {
   long n = (long)rows * N;
-  bias_residual_k<<<ndiv(n, TPB), TPB>>>(y, bias, resid, out, N, n);
+  bias_residual_k<float><<<ndiv(n, TPB), TPB>>>(y, bias, resid, out, N, n);
+}
+void k_bias_residual_bf(const void *y, const void *bias, const void *resid,
+                        void *out, int rows, int N) {
+  long n = (long)rows * N;
+  bias_residual_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)y,
+      (const __nv_bfloat16 *)bias, (const __nv_bfloat16 *)resid, (__nv_bfloat16 *)out, N, n);
 }
 
-__global__ void bias_gelu_k(const float *y, const float *bias, float *pre, float *act,
-                            int N, long n) {
+template <class ST>
+__global__ void bias_gelu_k(const ST *y, const ST *bias, ST *pre, ST *act, int N, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  float p = y[i] + bias[i % N];
-  pre[i] = p;
-  act[i] = gelu_f(p);
+  float p = toF(y[i]) + toF(bias[i % N]);
+  pre[i] = fromF<ST>(p);
+  act[i] = fromF<ST>(gelu_f(p));
 }
 void k_bias_gelu(const float *y, const float *bias, float *pre, float *act, int rows, int N) {
   long n = (long)rows * N;
-  bias_gelu_k<<<ndiv(n, TPB), TPB>>>(y, bias, pre, act, N, n);
+  bias_gelu_k<float><<<ndiv(n, TPB), TPB>>>(y, bias, pre, act, N, n);
+}
+void k_bias_gelu_bf(const void *y, const void *bias, void *pre, void *act, int rows, int N) {
+  long n = (long)rows * N;
+  bias_gelu_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)y,
+      (const __nv_bfloat16 *)bias, (__nv_bfloat16 *)pre, (__nv_bfloat16 *)act, N, n);
 }
 
-__global__ void ce_fwd_k(const float *logits, const int *tgt, float *probs,
+template <class ST>
+__global__ void ce_fwd_k(const ST *logits, const int *tgt, float *probs,
                          float *rowloss, int vocab) {
   int row = blockIdx.x;
-  const float *lr = logits + (long)row * vocab;
+  const ST *lr = logits + (long)row * vocab;
   float *pr = probs + (long)row * vocab;
   extern __shared__ float sh[];
   float m = -INFINITY;
-  for (int j = threadIdx.x; j < vocab; j += blockDim.x) m = fmaxf(m, lr[j]);
+  for (int j = threadIdx.x; j < vocab; j += blockDim.x) m = fmaxf(m, toF(lr[j]));
   m = block_max(m, sh);
   float s = 0;
-  for (int j = threadIdx.x; j < vocab; j += blockDim.x) { float e = expf(lr[j] - m); pr[j] = e; s += e; }
+  for (int j = threadIdx.x; j < vocab; j += blockDim.x) { float e = expf(toF(lr[j]) - m); pr[j] = e; s += e; }
   s = block_sum(s, sh);
   for (int j = threadIdx.x; j < vocab; j += blockDim.x) pr[j] /= s;
   if (threadIdx.x == 0) rowloss[row] = -logf(pr[tgt[row]]);
 }
 void k_cross_entropy_fwd(const float *logits, const int *tgt, float *probs,
                          float *rowloss, int rows, int vocab) {
-  ce_fwd_k<<<rows, TPB, TPB * sizeof(float)>>>(logits, tgt, probs, rowloss, vocab);
+  ce_fwd_k<float><<<rows, TPB, TPB * sizeof(float)>>>(logits, tgt, probs, rowloss, vocab);
+}
+void k_cross_entropy_fwd_bf(const void *logits, const int *tgt, float *probs,
+                            float *rowloss, int rows, int vocab) {
+  ce_fwd_k<__nv_bfloat16><<<rows, TPB, TPB * sizeof(float)>>>(
+      (const __nv_bfloat16 *)logits, tgt, probs, rowloss, vocab);
 }
 
 // ---- backward ----------------------------------------------------------------

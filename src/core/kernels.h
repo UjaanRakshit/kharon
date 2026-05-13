@@ -10,12 +10,22 @@ void gemm_init(void);
 void gemm_destroy(void);
 // C[M,N] = A[M,K] @ B[N,K]^T
 void mm_nt(const float *A, const float *B, float *C, int M, int N, int K);
-// BF16 tensor-core GEMM: A,B are bf16 (void*), C fp32, FP32 accumulation.
-// C[M,N] = A[M,K] @ B[N,K]^T
-void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K);
+// BF16 tensor-core GEMM: A,B are bf16 (void*), FP32 accumulation. C[M,N]=A[M,K]@B[N,K]^T
+void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K);   // fp32 out
+void mm_nt_bf16o(const void *A, const void *B, void *C, int M, int N, int K);   // bf16 out
 // dtype casts (bf16 buffers passed as void*)
 void k_f2b(const float *in, void *out, long n);
 void k_b2f(const void *in, float *out, long n);
+// bf16 forward kernels (activations in bf16 storage; reductions compute in fp32)
+void k_embed_bf(const void *wte, const void *wpe, const int *idx, void *out, int B, int T, int d);
+void k_layernorm_fwd_bf(const void *x, const void *w, const void *b, void *out,
+                        float *mean, float *rstd, int rows, int d);
+void k_bias_residual_bf(const void *y, const void *bias, const void *resid, void *out, int rows, int N);
+void k_bias_gelu_bf(const void *y, const void *bias, void *pre, void *act, int rows, int N);
+void k_split_heads_bf(const void *qkv, void *q, void *k, void *v, int B, int T, int H, int hd);
+void k_merge_heads_bf(const void *atto, void *out, int B, int T, int H, int hd);
+void k_cross_entropy_fwd_bf(const void *logits, const int *tgt, float *probs,
+                            float *rowloss, int rows, int vocab);
 // C[M,N] = A[M,K] @ B[K,N]
 void mm_nn(const float *A, const float *B, float *C, int M, int N, int K);
 // C[M,N] = A[K,M]^T @ B[K,N]
