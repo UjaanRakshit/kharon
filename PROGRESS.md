@@ -8,7 +8,7 @@
 |---|-----------|-------|--------|------------------|---------|
 | 1 | Single-GPU GPT + ckpt | done | ✓ (4060 + L40S) | 0.64 ms/step 805k tok/s (L40S); 7.1 ms 72k (4060) | — |
 | 2 | FlashAttention + fused | done | ✓ FA fwd+bwd vs SDPA | FA 1.5 TFLOP/s, 0.82x cuBLAS (L40S); fusion 1.7x (4060) | beat-cuBLAS needs M3 BF16/TC |
-| 3 | BF16 + full step | not started | — | — | — |
+| 3 | BF16 + full step | in progress | — | bf16 TC gemm 3.3x (4060) | forward kernels done; model path/train next |
 | 4 | TP=2 | not started | — | — | — |
 | 5 | PP (1F1B) | not started | — | — | — |
 | 6 | TP×PP | not started | — | — | — |
@@ -49,6 +49,18 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-29 — M3 in progress (branch m3-bf16). Done + validated: bf16 tensor-core GEMM
+  (cublasGemmEx, 3.3x vs fp32, rel-fro 2e-3); f32<->bf16 casts; memory budget (18 B/param,
+  use proxy); and the full bf16 FORWARD kernel suite — templatized on storage dtype so the
+  fp32 path is unchanged (all M1/M2 oracles still pass). bf16 kernels: mm_nt_bf16o (bf16-out
+  GEMM), ln_fwd, bias_residual, bias_gelu, ce_fwd, split/merge_heads, embed, FA forward.
+  NEXT (fresh session): (1) wire parallel bf16 weight+activation arenas into Model + a
+  model_sync_bf16 (cast master->bf16) + model_forward_bf16/backward_bf16 (mirror fp32 path,
+  call _bf launchers + mm_nt_bf16o, weight-grad GEMMs output fp32, fp32 master+AdamW);
+  (2) bf16 backward kernels (templatize ln_bwd, gelu_bwd, ce_bwd, colsum, embed_bwd, combine,
+  FA bwd); (3) validate bf16 fwd logits vs fp32/PyTorch within bf16 tol; (4) PyTorch AMP-bf16
+  loss-curve oracle; (5) byte-level data loader from ~/scratch; (6) L40S train run + bit-exact
+  bf16 resume + tokens/sec. Keep fp32 path as the debug oracle (it is, via <float> instantiation).
 - 2026-05-29 — M2 done: hand-written FlashAttention (fwd+bwd, tiled online softmax,
   causal) oracle-verified vs PyTorch SDPA; swapped into the model (M1 oracles still pass).
   Optimized FP32 FA to warp-per-row: FA fwd 0.4->1.5 TFLOP/s, 0.19x->0.82x cuBLAS, model
