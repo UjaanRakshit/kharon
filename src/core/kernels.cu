@@ -61,6 +61,14 @@ void mm_tn_batched(const float *A, const float *B, float *C, int M, int N, int K
 #define TPB 256
 static inline int ndiv(long n, int b) { return (int)((n + b - 1) / b); }
 
+// Storage-dtype helpers: kernels compute in float, store as float or bf16.
+template <class T> __device__ __forceinline__ float toF(T x);
+template <> __device__ __forceinline__ float toF<float>(float x) { return x; }
+template <> __device__ __forceinline__ float toF<__nv_bfloat16>(__nv_bfloat16 x) { return __bfloat162float(x); }
+template <class T> __device__ __forceinline__ T fromF(float x);
+template <> __device__ __forceinline__ float fromF<float>(float x) { return x; }
+template <> __device__ __forceinline__ __nv_bfloat16 fromF<__nv_bfloat16>(float x) { return __float2bfloat16(x); }
+
 __device__ float block_sum(float v, float *sh) {
   int t = threadIdx.x;
   __syncthreads();          // ensure prior readers of sh are done before reuse
@@ -84,39 +92,53 @@ __device__ float block_max(float v, float *sh) {
   return sh[0];
 }
 
-__global__ void embed_k(const float *wte, const float *wpe, const int *idx,
-                        float *out, int T, int d, long n) {
+template <class ST>
+__global__ void embed_k(const ST *wte, const ST *wpe, const int *idx,
+                        ST *out, int T, int d, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int row = i / d, col = i % d, t = row % T, tok = idx[row];
-  out[i] = wte[(long)tok * d + col] + wpe[(long)t * d + col];
+  out[i] = fromF<ST>(toF(wte[(long)tok * d + col]) + toF(wpe[(long)t * d + col]));
 }
 void k_embed(const float *wte, const float *wpe, const int *idx, float *out,
              int B, int T, int d) {
   long n = (long)B * T * d;
-  embed_k<<<ndiv(n, TPB), TPB>>>(wte, wpe, idx, out, T, d, n);
+  embed_k<float><<<ndiv(n, TPB), TPB>>>(wte, wpe, idx, out, T, d, n);
+}
+void k_embed_bf(const void *wte, const void *wpe, const int *idx, void *out,
+                int B, int T, int d) {
+  long n = (long)B * T * d;
+  embed_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)wte,
+      (const __nv_bfloat16 *)wpe, idx, (__nv_bfloat16 *)out, T, d, n);
 }
 
-__global__ void layernorm_fwd_k(const float *x, const float *w, const float *b,
-                                float *out, float *mean, float *rstd, int d) {
+template <class ST>
+__global__ void layernorm_fwd_k(const ST *x, const ST *w, const ST *b,
+                                ST *out, float *mean, float *rstd, int d) {
   int row = blockIdx.x;
-  const float *xr = x + (long)row * d;
-  float *outr = out + (long)row * d;
+  const ST *xr = x + (long)row * d;
+  ST *outr = out + (long)row * d;
   extern __shared__ float sh[];
   float s = 0;
-  for (int j = threadIdx.x; j < d; j += blockDim.x) s += xr[j];
+  for (int j = threadIdx.x; j < d; j += blockDim.x) s += toF(xr[j]);
   float mu = block_sum(s, sh) / d;
   float vs = 0;
-  for (int j = threadIdx.x; j < d; j += blockDim.x) { float t = xr[j] - mu; vs += t * t; }
+  for (int j = threadIdx.x; j < d; j += blockDim.x) { float t = toF(xr[j]) - mu; vs += t * t; }
   float var = block_sum(vs, sh) / d;
   float rs = rsqrtf(var + 1e-5f);
   if (threadIdx.x == 0) { mean[row] = mu; rstd[row] = rs; }
   for (int j = threadIdx.x; j < d; j += blockDim.x)
-    outr[j] = (xr[j] - mu) * rs * w[j] + b[j];
+    outr[j] = fromF<ST>((toF(xr[j]) - mu) * rs * toF(w[j]) + toF(b[j]));
 }
 void k_layernorm_fwd(const float *x, const float *w, const float *b,
                      float *out, float *mean, float *rstd, int rows, int d) {
-  layernorm_fwd_k<<<rows, TPB, TPB * sizeof(float)>>>(x, w, b, out, mean, rstd, d);
+  layernorm_fwd_k<float><<<rows, TPB, TPB * sizeof(float)>>>(x, w, b, out, mean, rstd, d);
+}
+void k_layernorm_fwd_bf(const void *x, const void *w, const void *b,
+                        void *out, float *mean, float *rstd, int rows, int d) {
+  layernorm_fwd_k<__nv_bfloat16><<<rows, TPB, TPB * sizeof(float)>>>(
+      (const __nv_bfloat16 *)x, (const __nv_bfloat16 *)w, (const __nv_bfloat16 *)b,
+      (__nv_bfloat16 *)out, mean, rstd, d);
 }
 
 __global__ void add_bias_k(float *y, const float *b, int N, long n) {
