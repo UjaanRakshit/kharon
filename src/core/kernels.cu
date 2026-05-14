@@ -148,14 +148,19 @@ void k_layernorm_fwd_bf(const void *x, const void *w, const void *b,
       (__nv_bfloat16 *)out, mean, rstd, d);
 }
 
-__global__ void add_bias_k(float *y, const float *b, int N, long n) {
+template <class ST>
+__global__ void add_bias_k(ST *y, const ST *b, int N, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  y[i] += b[i % N];
+  y[i] = fromF<ST>(toF(y[i]) + toF(b[i % N]));
 }
 void k_add_bias(float *y, const float *b, int rows, int N) {
   long n = (long)rows * N;
-  add_bias_k<<<ndiv(n, TPB), TPB>>>(y, b, N, n);
+  add_bias_k<float><<<ndiv(n, TPB), TPB>>>(y, b, N, n);
+}
+void k_add_bias_bf(void *y, const void *b, int rows, int N) {
+  long n = (long)rows * N;
+  add_bias_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((__nv_bfloat16 *)y, (const __nv_bfloat16 *)b, N, n);
 }
 
 template <class ST>

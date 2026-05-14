@@ -70,8 +70,9 @@ typedef struct {
 typedef struct {
   Config cfg;
   Arena w_arena, g_arena, a_arena, s_arena;   // params, grads, activations, bwd scratch
-  Weights w, g;
-  Acts a;
+  Arena wb_arena, ab_arena;                   // bf16 compute copies of weights + activations
+  Weights w, g, w_bf;
+  Acts a, a_bf;
   Bwd s;
   Arena om_arena, ov_arena;           // AdamW moment buffers (flat over params)
   float *opt_m, *opt_v;
@@ -91,6 +92,8 @@ void   model_set_input(Model *m, const int *idx, const int *tgt);
 float  model_forward(Model *m);                // returns loss
 void   model_backward(Model *m);
 void   model_adamw_step(Model *m, float lr, float b1, float b2, float eps, float wd);
+void   model_sync_bf16(Model *m);              // cast fp32 master weights -> bf16 compute copy
+float  model_forward_bf16(Model *m);           // bf16 mixed-precision forward (returns loss)
 
 #ifdef __cplusplus
 }

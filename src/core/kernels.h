@@ -18,6 +18,7 @@ void k_f2b(const float *in, void *out, long n);
 void k_b2f(const void *in, float *out, long n);
 // bf16 forward kernels (activations in bf16 storage; reductions compute in fp32)
 void k_embed_bf(const void *wte, const void *wpe, const int *idx, void *out, int B, int T, int d);
+void k_add_bias_bf(void *y, const void *b, int rows, int N);
 void k_layernorm_fwd_bf(const void *x, const void *w, const void *b, void *out,
                         float *mean, float *rstd, int rows, int d);
 void k_bias_residual_bf(const void *y, const void *bias, const void *resid, void *out, int rows, int N);
