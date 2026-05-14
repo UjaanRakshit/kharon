@@ -49,6 +49,16 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-29 (cont.) — M3 bf16 FORWARD now wired into the model and validated:
+  model_forward_bf16 (bf16 weights+acts via tensor-core GEMMs, fp32 reduction stats,
+  fp32 master) matches the PyTorch fp32 ref at bf16 tol (loss reldiff 1.4e-5, logits
+  maxabs 8e-3). Parallel bf16 weight/act arenas + model_sync_bf16 (cast master->bf16).
+  Fixed a real build bug: Makefile had no header deps, so a Model-struct change left
+  adamw.o/ckpt.o compiled against the old layout (stale offsets) -> corrupted step/resume;
+  now every object rebuilds on any header change. All 6 oracles green; resume memcheck clean.
+  NEXT: bf16 BACKWARD — weight grads stay fp32 (AdamW master), activation grads bf16; need
+  mm_tn bf16->fp32, mm_nn bf16->bf16, templatized ln_bwd/gelu_bwd/ce_bwd/colsum/embed_bwd/
+  combine/FA-bwd + model_backward_bf16; then bf16 train-step test, AMP oracle, data loader, run.
 - 2026-05-29 — M3 in progress (branch m3-bf16). Done + validated: bf16 tensor-core GEMM
   (cublasGemmEx, 3.3x vs fp32, rel-fro 2e-3); f32<->bf16 casts; memory budget (18 B/param,
   use proxy); and the full bf16 FORWARD kernel suite — templatized on storage dtype so the
