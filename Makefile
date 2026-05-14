@@ -17,6 +17,7 @@ endif
 
 NVCCFLAGS := -arch=$(ARCH) $(OPT) $(INC)
 LDLIBS    := -lcublas
+HDRS := $(wildcard src/core/*.h src/kernels/*.h)
 
 # On Windows, MSYS make mangles PATH for the native nvcc child, so cl.exe is not
 # found via PATH. Point nvcc at it directly with -ccbin (set by scripts/build.ps1).
@@ -29,7 +30,7 @@ CORE_CU := kernels
 K_CU    := flash
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
-TESTS := test_loadref test_forward test_backward test_step test_resume test_flash
+TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
 BENCH := bench_step bench_fused bench_flash bench_bf16
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
@@ -39,13 +40,14 @@ all: tests bench
 tests: $(BINS)
 bench: $(BENCHBINS)
 
-$(BUILD)/%.o: src/core/%.c | $(BUILD)
+# Coarse but portable: any header change rebuilds all objects (no nvcc/MSVC -MMD).
+$(BUILD)/%.o: src/core/%.c $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) -c $< -o $@
 
-$(BUILD)/%.o: src/core/%.cu | $(BUILD)
+$(BUILD)/%.o: src/core/%.cu $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: src/kernels/%.cu | $(BUILD)
+$(BUILD)/%.o: src/kernels/%.cu $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(BUILD)/%.exe: tests/%.c $(OBJ) | $(BUILD)
