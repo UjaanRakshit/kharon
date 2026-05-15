@@ -66,19 +66,19 @@ static void layout_acts(Arena *ar, Config c, Acts *a, int es) {
   a->rowloss = (float *)arena_alloc(ar, R * 4);
 }
 
-static void layout_scratch(Arena *ar, Config c, Bwd *s) {
+static void layout_scratch(Arena *ar, Config c, Bwd *s, int es) {
   int d = c.d_model, ff = 4 * d, V = c.vocab, H = c.n_head;
   long R = (long)c.batch * c.seq, T = c.seq, BHT2 = (long)c.batch * H * T * T;
   float **rd[] = {&s->dx, &s->res1, &s->proj, &s->fcproj, &s->lntmp, &s->ln1, &s->ln2,
                   &s->atto_m, &s->atto, &s->q, &s->k, &s->v, &s->lnf};
   for (int i = 0; i < (int)(sizeof(rd) / sizeof(rd[0])); i++)
-    *rd[i] = (float *)arena_alloc(ar, R * d * 4);
-  s->fc = (float *)arena_alloc(ar, R * ff * 4);
-  s->gelu = (float *)arena_alloc(ar, R * ff * 4);
-  s->att = (float *)arena_alloc(ar, BHT2 * 4);
-  s->scores = (float *)arena_alloc(ar, BHT2 * 4);
-  s->qkv = (float *)arena_alloc(ar, R * 3 * d * 4);
-  s->logits = (float *)arena_alloc(ar, R * V * 4);
+    *rd[i] = (float *)arena_alloc(ar, R * d * es);
+  s->fc = (float *)arena_alloc(ar, R * ff * es);
+  s->gelu = (float *)arena_alloc(ar, R * ff * es);
+  s->att = (float *)arena_alloc(ar, BHT2 * es);
+  s->scores = (float *)arena_alloc(ar, BHT2 * es);
+  s->qkv = (float *)arena_alloc(ar, R * 3 * d * es);
+  s->logits = (float *)arena_alloc(ar, R * V * es);
 }
 
 static long scratch_bytes(Config c) {
@@ -114,11 +114,13 @@ Model *model_create(Config cfg) {
   layout_weights(&m->w_arena, cfg, &m->w, 4);
   layout_weights(&m->g_arena, cfg, &m->g, 4);
   layout_acts(&m->a_arena, cfg, &m->a, 4);
-  layout_scratch(&m->s_arena, cfg, &m->s);
+  layout_scratch(&m->s_arena, cfg, &m->s, 4);
   m->wb_arena = arena_create("wbf16", wb / 2 + slack, 1);
   m->ab_arena = arena_create("abf16", ab + slack, 1);   // bf16 acts but fp32 stats don't halve
+  m->sb_arena = arena_create("sbf16", sb / 2 + slack, 1);
   layout_weights(&m->wb_arena, cfg, &m->w_bf, 2);
   layout_acts(&m->ab_arena, cfg, &m->a_bf, 2);
+  layout_scratch(&m->sb_arena, cfg, &m->s_bf, 2);
   // optimizer moments are flat over the whole param arena (identical layout)
   long pbytes = m->w_arena.off;
   m->om_arena = arena_create("adam_m", pbytes, 1);
@@ -142,7 +144,7 @@ void model_free(Model *m) {
   arena_destroy(&m->w_arena); arena_destroy(&m->g_arena);
   arena_destroy(&m->a_arena); arena_destroy(&m->s_arena);
   arena_destroy(&m->om_arena); arena_destroy(&m->ov_arena);
-  arena_destroy(&m->wb_arena); arena_destroy(&m->ab_arena);
+  arena_destroy(&m->wb_arena); arena_destroy(&m->ab_arena); arena_destroy(&m->sb_arena);
   free(m->w.layer); free(m->g.layer); free(m->a.layer);
   free(m->w_bf.layer); free(m->a_bf.layer);
   free(m);
@@ -286,6 +288,67 @@ float model_forward_bf16(Model *m) {
   free(h);
   m->loss = (float)(s / R);
   return m->loss;
+}
+
+static void dcopyb(void *dst, const void *src, long n) {
+  CK(cudaMemcpy(dst, src, n * 2, cudaMemcpyDeviceToDevice));   // bf16 = 2 bytes
+}
+
+// BF16 backward: activation grads in bf16 (s_bf), weight grads accumulated fp32 (g)
+// for the AdamW master. Mirrors model_backward op-for-op.
+void model_backward_bf16(Model *m) {
+  Config c = m->cfg;
+  int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d, T = c.seq, B = c.batch;
+  long R = (long)B * T, RD = R * d;
+  float scale = 1.f / sqrtf((float)hd);
+  Weights *w = &m->w_bf, *g = &m->g;
+  Acts *a = &m->a_bf, *af = &m->a;
+  Bwd *s = &m->s_bf;
+
+  CK(cudaMemset(m->g_arena.base, 0, m->g_arena.off));
+
+  k_cross_entropy_bwd_bf(af->probs, m->d_tgt, s->logits, R, V, 1.f / R);
+  mm_nn_bf16o(s->logits, w->wte, s->lnf, R, d, V);
+  mm_tn_bf16(s->logits, a->lnf, g->wte, V, d, R);
+
+  void *xlast = c.n_layer ? a->layer[c.n_layer - 1].res2 : a->emb;
+  k_layernorm_bwd_bf(s->lnf, xlast, w->lnf_w, af->lnf_mean, af->lnf_rstd,
+                     s->dx, g->lnf_w, g->lnf_b, R, d);
+
+  for (int l = c.n_layer - 1; l >= 0; l--) {
+    LayerW *W = &w->layer[l], *gL = &g->layer[l];
+    LayerAct *A = &a->layer[l], *F = &af->layer[l];
+    void *xin = l ? a->layer[l - 1].res2 : a->emb;
+
+    dcopyb(s->res1, s->dx, RD);
+    dcopyb(s->fcproj, s->dx, RD);
+    k_colsum_bf(s->fcproj, gL->fcproj_b, R, d);
+    mm_tn_bf16(s->fcproj, A->gelu, gL->fcproj_w, d, ff, R);
+    mm_nn_bf16o(s->fcproj, W->fcproj_w, s->gelu, R, ff, d);
+    k_gelu_bwd_bf(A->fc, s->gelu, s->fc, R * ff);
+    k_colsum_bf(s->fc, gL->fc_b, R, ff);
+    mm_tn_bf16(s->fc, A->ln2, gL->fc_w, ff, d, R);
+    mm_nn_bf16o(s->fc, W->fc_w, s->ln2, R, d, ff);
+    k_layernorm_bwd_bf(s->ln2, A->res1, W->ln2_w, F->ln2_mean, F->ln2_rstd,
+                       s->lntmp, gL->ln2_w, gL->ln2_b, R, d);
+    k_add_bf(s->res1, s->lntmp, s->res1, RD);
+    dcopyb(s->dx, s->res1, RD);
+    dcopyb(s->proj, s->res1, RD);
+    k_colsum_bf(s->proj, gL->proj_b, R, d);
+    mm_tn_bf16(s->proj, A->atto_m, gL->proj_w, d, d, R);
+    mm_nn_bf16o(s->proj, W->proj_w, s->atto_m, R, d, d);
+    k_unmerge_heads_bf(s->atto_m, s->atto, B, T, H, hd);
+    flash_attn_bwd_bf(A->q, A->k, A->v, A->atto, F->lse, s->atto, s->q, s->k, s->v, B, H, T, hd, scale);
+    k_combine_qkv_bf(s->q, s->k, s->v, s->qkv, B, T, H, hd);
+    k_colsum_bf(s->qkv, gL->qkv_b, R, 3 * d);
+    mm_tn_bf16(s->qkv, A->ln1, gL->qkv_w, 3 * d, d, R);
+    mm_nn_bf16o(s->qkv, W->qkv_w, s->ln1, R, d, 3 * d);
+    k_layernorm_bwd_bf(s->ln1, xin, W->ln1_w, F->ln1_mean, F->ln1_rstd,
+                       s->lntmp, gL->ln1_w, gL->ln1_b, R, d);
+    k_add_bf(s->dx, s->lntmp, s->dx, RD);
+  }
+  k_embed_bwd_wte_bf(s->dx, m->d_idx, g->wte, R, V, d);
+  k_embed_bwd_wpe_bf(s->dx, g->wpe, B, T, d);
 }
 
 void model_backward(Model *m) {

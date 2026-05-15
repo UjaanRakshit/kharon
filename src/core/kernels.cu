@@ -35,6 +35,20 @@ void mm_nt_bf16o(const void *A, const void *B, void *C, int M, int N, int K) {
                          B, CUDA_R_16BF, K, A, CUDA_R_16BF, K, &b,
                          C, CUDA_R_16BF, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
+// C[M,N] = A[K,M]^T @ B[K,N], bf16 in, fp32 out — weight grads (feed fp32 AdamW).
+void mm_tn_bf16(const void *A, const void *B, float *C, int M, int N, int K) {
+  const float a = 1.f, b = 0.f;
+  CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, &a,
+                         B, CUDA_R_16BF, N, A, CUDA_R_16BF, M, &b,
+                         C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+}
+// C[M,N] = A[M,K] @ B[K,N], bf16 in/out — activation grads stay bf16.
+void mm_nn_bf16o(const void *A, const void *B, void *C, int M, int N, int K) {
+  const float a = 1.f, b = 0.f;
+  CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &a,
+                         B, CUDA_R_16BF, N, A, CUDA_R_16BF, K, &b,
+                         C, CUDA_R_16BF, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+}
 void mm_nn(const float *A, const float *B, float *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
   CUBLAS_CK(cublasSgemm(g_h, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
@@ -236,12 +250,16 @@ void k_gelu_fwd(const float *x, float *y, long n) {
   gelu_fwd_k<<<ndiv(n, TPB), TPB>>>(x, y, n);
 }
 
-__global__ void add_k(const float *a, const float *b, float *c, long n) {
+template <class ST>
+__global__ void add_k(const ST *a, const ST *b, ST *c, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) c[i] = a[i] + b[i];
+  if (i < n) c[i] = fromF<ST>(toF(a[i]) + toF(b[i]));
 }
 void k_add(const float *a, const float *b, float *c, long n) {
-  add_k<<<ndiv(n, TPB), TPB>>>(a, b, c, n);
+  add_k<float><<<ndiv(n, TPB), TPB>>>(a, b, c, n);
+}
+void k_add_bf(const void *a, const void *b, void *c, long n) {
+  add_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)a, (const __nv_bfloat16 *)b, (__nv_bfloat16 *)c, n);
 }
 
 template <class ST>
@@ -307,49 +325,55 @@ void k_cross_entropy_fwd_bf(const void *logits, const int *tgt, float *probs,
 }
 
 // ---- backward ----------------------------------------------------------------
-__global__ void ce_bwd_k(const float *probs, const int *tgt, float *dlogits,
+template <class ST>
+__global__ void ce_bwd_k(const float *probs, const int *tgt, ST *dlogits,
                          int vocab, float invN) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-  long n = (long)gridDim.x * blockDim.x;
-  (void)n;
   int row = i / vocab, col = i % vocab;
-  dlogits[i] = (probs[i] - (col == tgt[row] ? 1.f : 0.f)) * invN;
+  dlogits[i] = fromF<ST>((probs[i] - (col == tgt[row] ? 1.f : 0.f)) * invN);
 }
 void k_cross_entropy_bwd(const float *probs, const int *tgt, float *dlogits,
                          int rows, int vocab, float invN) {
   long n = (long)rows * vocab;
-  ce_bwd_k<<<ndiv(n, TPB), TPB>>>(probs, tgt, dlogits, vocab, invN);
+  ce_bwd_k<float><<<ndiv(n, TPB), TPB>>>(probs, tgt, dlogits, vocab, invN);
+}
+void k_cross_entropy_bwd_bf(const float *probs, const int *tgt, void *dlogits,
+                            int rows, int vocab, float invN) {
+  long n = (long)rows * vocab;
+  ce_bwd_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>(probs, tgt, (__nv_bfloat16 *)dlogits, vocab, invN);
 }
 
-__global__ void layernorm_bwd_dx_k(const float *dy, const float *x, const float *w,
-                                   const float *mean, const float *rstd, float *dx, int d) {
+template <class ST>
+__global__ void layernorm_bwd_dx_k(const ST *dy, const ST *x, const ST *w,
+                                   const float *mean, const float *rstd, ST *dx, int d) {
   int row = blockIdx.x;
-  const float *dyr = dy + (long)row * d, *xr = x + (long)row * d;
-  float *dxr = dx + (long)row * d;
+  const ST *dyr = dy + (long)row * d, *xr = x + (long)row * d;
+  ST *dxr = dx + (long)row * d;
   float mu = mean[row], rs = rstd[row];
   extern __shared__ float sh[];
   float s1 = 0, s2 = 0;
   for (int j = threadIdx.x; j < d; j += blockDim.x) {
-    float xh = (xr[j] - mu) * rs, dxh = dyr[j] * w[j];
+    float xh = (toF(xr[j]) - mu) * rs, dxh = toF(dyr[j]) * toF(w[j]);
     s1 += dxh; s2 += dxh * xh;
   }
   float m1 = block_sum(s1, sh) / d;
   float m2 = block_sum(s2, sh) / d;
   for (int j = threadIdx.x; j < d; j += blockDim.x) {
-    float xh = (xr[j] - mu) * rs, dxh = dyr[j] * w[j];
-    dxr[j] = rs * (dxh - m1 - xh * m2);
+    float xh = (toF(xr[j]) - mu) * rs, dxh = toF(dyr[j]) * toF(w[j]);
+    dxr[j] = fromF<ST>(rs * (dxh - m1 - xh * m2));
   }
 }
-// one thread per column j: deterministic reduction over rows for dw, db
-__global__ void layernorm_bwd_dwdb_k(const float *dy, const float *x,
+// one thread per column j: deterministic reduction over rows. dw,db are fp32.
+template <class ST>
+__global__ void layernorm_bwd_dwdb_k(const ST *dy, const ST *x,
                                      const float *mean, const float *rstd,
                                      float *dw, float *db, int rows, int d) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j >= d) return;
   float sw = 0, sb = 0;
   for (int r = 0; r < rows; r++) {
-    float dyv = dy[(long)r * d + j];
-    float xh = (x[(long)r * d + j] - mean[r]) * rstd[r];
+    float dyv = toF(dy[(long)r * d + j]);
+    float xh = (toF(x[(long)r * d + j]) - mean[r]) * rstd[r];
     sw += dyv * xh; sb += dyv;
   }
   dw[j] += sw; db[j] += sb;
@@ -357,23 +381,37 @@ __global__ void layernorm_bwd_dwdb_k(const float *dy, const float *x,
 void k_layernorm_bwd(const float *dy, const float *x, const float *w,
                      const float *mean, const float *rstd,
                      float *dx, float *dw, float *db, int rows, int d) {
-  layernorm_bwd_dx_k<<<rows, TPB, TPB * sizeof(float)>>>(dy, x, w, mean, rstd, dx, d);
-  layernorm_bwd_dwdb_k<<<ndiv(d, TPB), TPB>>>(dy, x, mean, rstd, dw, db, rows, d);
+  layernorm_bwd_dx_k<float><<<rows, TPB, TPB * sizeof(float)>>>(dy, x, w, mean, rstd, dx, d);
+  layernorm_bwd_dwdb_k<float><<<ndiv(d, TPB), TPB>>>(dy, x, mean, rstd, dw, db, rows, d);
+}
+void k_layernorm_bwd_bf(const void *dy, const void *x, const void *w,
+                        const float *mean, const float *rstd,
+                        void *dx, float *dw, float *db, int rows, int d) {
+  layernorm_bwd_dx_k<__nv_bfloat16><<<rows, TPB, TPB * sizeof(float)>>>(
+      (const __nv_bfloat16 *)dy, (const __nv_bfloat16 *)x, (const __nv_bfloat16 *)w,
+      mean, rstd, (__nv_bfloat16 *)dx, d);
+  layernorm_bwd_dwdb_k<__nv_bfloat16><<<ndiv(d, TPB), TPB>>>(
+      (const __nv_bfloat16 *)dy, (const __nv_bfloat16 *)x, mean, rstd, dw, db, rows, d);
 }
 
-__global__ void gelu_bwd_k(const float *x, const float *dy, float *dx, long n) {
+template <class ST>
+__global__ void gelu_bwd_k(const ST *x, const ST *dy, ST *dx, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   const float c = 0.7978845608028654f, a = 0.044715f;
-  float xv = x[i];
+  float xv = toF(x[i]);
   float u = c * (xv + a * xv * xv * xv);
   float t = tanhf(u);
   float dudx = c * (1.f + 3.f * a * xv * xv);
   float dg = 0.5f * (1.f + t) + 0.5f * xv * (1.f - t * t) * dudx;
-  dx[i] = dy[i] * dg;
+  dx[i] = fromF<ST>(toF(dy[i]) * dg);
 }
 void k_gelu_bwd(const float *x, const float *dy, float *dx, long n) {
-  gelu_bwd_k<<<ndiv(n, TPB), TPB>>>(x, dy, dx, n);
+  gelu_bwd_k<float><<<ndiv(n, TPB), TPB>>>(x, dy, dx, n);
+}
+void k_gelu_bwd_bf(const void *x, const void *dy, void *dx, long n) {
+  gelu_bwd_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>(
+      (const __nv_bfloat16 *)x, (const __nv_bfloat16 *)dy, (__nv_bfloat16 *)dx, n);
 }
 
 __global__ void softmax_causal_bwd_k(const float *att, const float *datt,
@@ -393,7 +431,8 @@ void k_softmax_causal_bwd(const float *att, const float *datt, float *dscores,
   softmax_causal_bwd_k<<<rows_bh, TPB, TPB * sizeof(float)>>>(att, datt, dscores, T, scale);
 }
 
-__global__ void unmerge_heads_k(const float *dout, float *datto, int T, int H, int hd, long n) {
+template <class ST>
+__global__ void unmerge_heads_k(const ST *dout, ST *datto, int T, int H, int hd, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int d = H * hd;
@@ -402,11 +441,17 @@ __global__ void unmerge_heads_k(const float *dout, float *datto, int T, int H, i
 }
 void k_unmerge_heads(const float *dout, float *datto, int B, int T, int H, int hd) {
   long n = (long)B * H * T * hd;
-  unmerge_heads_k<<<ndiv(n, TPB), TPB>>>(dout, datto, T, H, hd, n);
+  unmerge_heads_k<float><<<ndiv(n, TPB), TPB>>>(dout, datto, T, H, hd, n);
+}
+void k_unmerge_heads_bf(const void *dout, void *datto, int B, int T, int H, int hd) {
+  long n = (long)B * H * T * hd;
+  unmerge_heads_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>(
+      (const __nv_bfloat16 *)dout, (__nv_bfloat16 *)datto, T, H, hd, n);
 }
 
-__global__ void combine_qkv_k(const float *dq, const float *dk, const float *dv,
-                              float *dqkv, int T, int H, int hd, long n) {
+template <class ST>
+__global__ void combine_qkv_k(const ST *dq, const ST *dk, const ST *dv,
+                              ST *dqkv, int T, int H, int hd, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int d = H * hd;
@@ -419,46 +464,68 @@ __global__ void combine_qkv_k(const float *dq, const float *dk, const float *dv,
 void k_combine_qkv(const float *dq, const float *dk, const float *dv, float *dqkv,
                    int B, int T, int H, int hd) {
   long n = (long)B * H * T * hd;
-  combine_qkv_k<<<ndiv(n, TPB), TPB>>>(dq, dk, dv, dqkv, T, H, hd, n);
+  combine_qkv_k<float><<<ndiv(n, TPB), TPB>>>(dq, dk, dv, dqkv, T, H, hd, n);
+}
+void k_combine_qkv_bf(const void *dq, const void *dk, const void *dv, void *dqkv,
+                      int B, int T, int H, int hd) {
+  long n = (long)B * H * T * hd;
+  combine_qkv_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>(
+      (const __nv_bfloat16 *)dq, (const __nv_bfloat16 *)dk, (const __nv_bfloat16 *)dv,
+      (__nv_bfloat16 *)dqkv, T, H, hd, n);
 }
 
-__global__ void colsum_k(const float *in, float *out, int rows, int N) {
+template <class ST>
+__global__ void colsum_k(const ST *in, float *out, int rows, int N) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j >= N) return;
   float s = 0;
-  for (int r = 0; r < rows; r++) s += in[(long)r * N + j];
+  for (int r = 0; r < rows; r++) s += toF(in[(long)r * N + j]);
   out[j] += s;
 }
 void k_colsum(const float *in, float *out, int rows, int N) {
-  colsum_k<<<ndiv(N, TPB), TPB>>>(in, out, rows, N);
+  colsum_k<float><<<ndiv(N, TPB), TPB>>>(in, out, rows, N);
+}
+void k_colsum_bf(const void *in, float *out, int rows, int N) {
+  colsum_k<__nv_bfloat16><<<ndiv(N, TPB), TPB>>>((const __nv_bfloat16 *)in, out, rows, N);
 }
 
-__global__ void embed_bwd_wte_k(const float *demb, const int *idx, float *dwte,
+template <class ST>
+__global__ void embed_bwd_wte_k(const ST *demb, const int *idx, float *dwte,
                                 int rows, int d, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int v = i / d, e = i % d;
   float s = 0;
-  for (int r = 0; r < rows; r++) if (idx[r] == v) s += demb[(long)r * d + e];
+  for (int r = 0; r < rows; r++) if (idx[r] == v) s += toF(demb[(long)r * d + e]);
   dwte[i] += s;
 }
 void k_embed_bwd_wte(const float *demb, const int *idx, float *dwte,
                      int rows, int vocab, int d) {
   long n = (long)vocab * d;
-  embed_bwd_wte_k<<<ndiv(n, TPB), TPB>>>(demb, idx, dwte, rows, d, n);
+  embed_bwd_wte_k<float><<<ndiv(n, TPB), TPB>>>(demb, idx, dwte, rows, d, n);
+}
+void k_embed_bwd_wte_bf(const void *demb, const int *idx, float *dwte,
+                        int rows, int vocab, int d) {
+  long n = (long)vocab * d;
+  embed_bwd_wte_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)demb, idx, dwte, rows, d, n);
 }
 
-__global__ void embed_bwd_wpe_k(const float *demb, float *dwpe, int B, int T, int d, long n) {
+template <class ST>
+__global__ void embed_bwd_wpe_k(const ST *demb, float *dwpe, int B, int T, int d, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int t = i / d, e = i % d;
   float s = 0;
-  for (int b = 0; b < B; b++) s += demb[(long)(b * T + t) * d + e];
+  for (int b = 0; b < B; b++) s += toF(demb[(long)(b * T + t) * d + e]);
   dwpe[i] += s;
 }
 void k_embed_bwd_wpe(const float *demb, float *dwpe, int B, int T, int d) {
   long n = (long)T * d;
-  embed_bwd_wpe_k<<<ndiv(n, TPB), TPB>>>(demb, dwpe, B, T, d, n);
+  embed_bwd_wpe_k<float><<<ndiv(n, TPB), TPB>>>(demb, dwpe, B, T, d, n);
+}
+void k_embed_bwd_wpe_bf(const void *demb, float *dwpe, int B, int T, int d) {
+  long n = (long)T * d;
+  embed_bwd_wpe_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>((const __nv_bfloat16 *)demb, dwpe, B, T, d, n);
 }
 
 // AdamW with decoupled weight decay (matches torch.optim.AdamW).

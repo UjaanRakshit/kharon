@@ -13,6 +13,8 @@ void mm_nt(const float *A, const float *B, float *C, int M, int N, int K);
 // BF16 tensor-core GEMM: A,B are bf16 (void*), FP32 accumulation. C[M,N]=A[M,K]@B[N,K]^T
 void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K);   // fp32 out
 void mm_nt_bf16o(const void *A, const void *B, void *C, int M, int N, int K);   // bf16 out
+void mm_tn_bf16(const void *A, const void *B, float *C, int M, int N, int K);   // A[K,M]^T@B[K,N], fp32 out
+void mm_nn_bf16o(const void *A, const void *B, void *C, int M, int N, int K);   // A[M,K]@B[K,N], bf16 out
 // dtype casts (bf16 buffers passed as void*)
 void k_f2b(const float *in, void *out, long n);
 void k_b2f(const void *in, float *out, long n);
@@ -27,6 +29,20 @@ void k_split_heads_bf(const void *qkv, void *q, void *k, void *v, int B, int T, 
 void k_merge_heads_bf(const void *atto, void *out, int B, int T, int H, int hd);
 void k_cross_entropy_fwd_bf(const void *logits, const int *tgt, float *probs,
                             float *rowloss, int rows, int vocab);
+// bf16 backward kernels (activation grads bf16; weight/bias/embed grads fp32 for AdamW)
+void k_cross_entropy_bwd_bf(const float *probs, const int *tgt, void *dlogits,
+                            int rows, int vocab, float invN);
+void k_layernorm_bwd_bf(const void *dy, const void *x, const void *w,
+                        const float *mean, const float *rstd,
+                        void *dx, float *dw, float *db, int rows, int d);
+void k_gelu_bwd_bf(const void *x, const void *dy, void *dx, long n);
+void k_unmerge_heads_bf(const void *dout, void *datto, int B, int T, int H, int hd);
+void k_combine_qkv_bf(const void *dq, const void *dk, const void *dv, void *dqkv,
+                      int B, int T, int H, int hd);
+void k_colsum_bf(const void *in, float *out, int rows, int N);
+void k_embed_bwd_wte_bf(const void *demb, const int *idx, float *dwte, int rows, int vocab, int d);
+void k_embed_bwd_wpe_bf(const void *demb, float *dwpe, int B, int T, int d);
+void k_add_bf(const void *a, const void *b, void *c, long n);
 // C[M,N] = A[M,K] @ B[K,N]
 void mm_nn(const float *A, const float *B, float *C, int M, int N, int K);
 // C[M,N] = A[K,M]^T @ B[K,N]
