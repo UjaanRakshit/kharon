@@ -1,6 +1,7 @@
 #include "model.h"
 #include "kernels.h"
 #include "flash.h"
+#include "rng.h"
 #include "kharon.h"
 #include <string.h>
 #include <math.h>
@@ -175,6 +176,44 @@ void model_load_ref(Model *m, RefFile *r) {
 #undef LD
   }
   cpy(m->w.lnf_w, r, "lnf.w", d); cpy(m->w.lnf_b, r, "lnf.b", d);
+}
+
+static float rnd_normal(Rng *st) {           // Box-Muller, one sample
+  float u1 = (rng_u32(st) + 1.f) / 4294967296.f;
+  float u2 = (float)rng_u32(st) / 4294967296.f;
+  return sqrtf(-2.f * logf(u1)) * cosf(6.2831853f * u2);
+}
+static void fill_normal(float *dptr, long n, float std, Rng *st) {
+  float *h = (float *)malloc(n * 4);
+  for (long i = 0; i < n; i++) h[i] = std * rnd_normal(st);
+  CK(cudaMemcpy(dptr, h, n * 4, cudaMemcpyHostToDevice));
+  free(h);
+}
+static void fill_const(float *dptr, long n, float v) {
+  float *h = (float *)malloc(n * 4);
+  for (long i = 0; i < n; i++) h[i] = v;
+  CK(cudaMemcpy(dptr, h, n * 4, cudaMemcpyHostToDevice));
+  free(h);
+}
+
+// GPT-2-style init: matmuls + embeddings ~ N(0,0.02), biases 0, LayerNorm w=1 b=0.
+void model_init_weights(Model *m, uint64_t seed) {
+  Config c = m->cfg;
+  int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d;
+  Rng st; rng_seed(&st, seed);
+  Weights *w = &m->w;
+  fill_normal(w->wte, (long)V * d, 0.02f, &st);
+  fill_normal(w->wpe, (long)S * d, 0.02f, &st);
+  for (int l = 0; l < c.n_layer; l++) {
+    LayerW *L = &w->layer[l];
+    fill_const(L->ln1_w, d, 1.f); fill_const(L->ln1_b, d, 0.f);
+    fill_normal(L->qkv_w, (long)3 * d * d, 0.02f, &st); fill_const(L->qkv_b, 3 * d, 0.f);
+    fill_normal(L->proj_w, (long)d * d, 0.02f, &st); fill_const(L->proj_b, d, 0.f);
+    fill_const(L->ln2_w, d, 1.f); fill_const(L->ln2_b, d, 0.f);
+    fill_normal(L->fc_w, (long)ff * d, 0.02f, &st); fill_const(L->fc_b, ff, 0.f);
+    fill_normal(L->fcproj_w, (long)d * ff, 0.02f, &st); fill_const(L->fcproj_b, d, 0.f);
+  }
+  fill_const(w->lnf_w, d, 1.f); fill_const(w->lnf_b, d, 0.f);
 }
 
 void model_set_input(Model *m, const int *idx, const int *tgt) {

@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "refio.h"
+#include <stdint.h>
 
 typedef struct {
   int n_layer, d_model, n_head, vocab, seq, batch;
@@ -88,6 +89,7 @@ extern "C" {
 Model *model_create(Config cfg);
 void   model_free(Model *m);
 void   model_load_ref(Model *m, RefFile *r);   // copy reference weights -> device
+void   model_init_weights(Model *m, uint64_t seed);  // random GPT-2-style init
 void   model_set_input(Model *m, const int *idx, const int *tgt);
 float  model_forward(Model *m);                // returns loss
 void   model_backward(Model *m);

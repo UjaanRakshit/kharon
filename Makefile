@@ -25,7 +25,7 @@ ifdef CCBIN
   NVCCFLAGS += -ccbin "$(CCBIN)"
 endif
 
-CORE_C  := arena refio gpt adamw ckpt
+CORE_C  := arena refio gpt adamw ckpt data
 CORE_CU := kernels
 K_CU    := flash
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
@@ -35,10 +35,14 @@ BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
 BENCH := bench_step bench_fused bench_flash bench_bf16
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 
-.PHONY: all tests bench clean
-all: tests bench
+.PHONY: all tests bench train clean
+all: tests bench train
 tests: $(BINS)
 bench: $(BENCHBINS)
+train: $(BUILD)/train.exe
+
+$(BUILD)/train.exe: src/train.c $(OBJ) $(HDRS) | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
 
 # Coarse but portable: any header change rebuilds all objects (no nvcc/MSVC -MMD).
 $(BUILD)/%.o: src/core/%.c $(HDRS) | $(BUILD)
