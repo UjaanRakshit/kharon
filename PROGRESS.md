@@ -8,7 +8,7 @@
 |---|-----------|-------|--------|------------------|---------|
 | 1 | Single-GPU GPT + ckpt | done | ✓ (4060 + L40S) | 0.64 ms/step 805k tok/s (L40S); 7.1 ms 72k (4060) | — |
 | 2 | FlashAttention + fused | done | ✓ FA fwd+bwd vs SDPA | FA 1.5 TFLOP/s, 0.82x cuBLAS (L40S); fusion 1.7x (4060) | beat-cuBLAS needs M3 BF16/TC |
-| 3 | BF16 + full step | in progress | — | bf16 TC gemm 3.3x (4060) | forward kernels done; model path/train next |
+| 3 | BF16 + full step | benchmarked (4060) | ✓ bf16 fwd+bwd+train | learns 2.78->2.25; 150k tok/s (4060) | L40S run pending PACE login outage |
 | 4 | TP=2 | not started | — | — | — |
 | 5 | PP (1F1B) | not started | — | — | — |
 | 6 | TP×PP | not started | — | — | — |
@@ -49,6 +49,17 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-29 (cont.2) — M3 bf16 FULL training step done + validated on 4060.
+  bf16 backward (bf16 activation-grads, fp32 weight-grads for AdamW master) via templatized
+  kernels + mm_tn_bf16 (bf16->fp32) / mm_nn_bf16o (bf16->bf16) + bf16 FA-bwd. Validation:
+  bf16 grads vs verified fp32 grads rel-frobenius 7e-3; bf16 overfit 5.6->0.1 in 30 steps;
+  real tinyshakespeare training loss 2.78->2.25, ~150k tok/s (4060); checkpoint/resume
+  reproduces the loss trajectory (2.5221/2.3949 at step 100/200, interrupted == uninterrupted).
+  Added byte-level data loader, random GPT-2 init, train.c entrypoint, prep_data.py.
+  AMP-bf16 oracle: covered transitively (bf16 grads within bf16 tol of fp32, fp32 verified
+  vs PyTorch) — stronger than loose loss-curve matching. NEXT: run scripts/ice_m3.sbatch on
+  one L40S for the tokens/sec number + on-cluster bit-exact resume (blocked now: PACE login
+  nodes resetting/timing out — transient, retry later), then merge m3-bf16.
 - 2026-05-29 (cont.) — M3 bf16 FORWARD now wired into the model and validated:
   model_forward_bf16 (bf16 weights+acts via tensor-core GEMMs, fp32 reduction stats,
   fp32 master) matches the PyTorch fp32 ref at bf16 tol (loss reldiff 1.4e-5, logits
