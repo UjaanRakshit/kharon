@@ -6,6 +6,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <cuda_runtime.h>
+#ifdef _WIN32
+#include <direct.h>
+#define MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define MKDIR(p) mkdir(p, 0777)
+#endif
+
+// Create the checkpoint's parent directory if it doesn't exist (portable).
+static void ensure_dir(const char *path) {
+  char buf[512];
+  strncpy(buf, path, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = 0;
+  char *s = strrchr(buf, '/');
+  if (!s) s = strrchr(buf, '\\');
+  if (s) { *s = 0; MKDIR(buf); }
+}
 
 // BF16 mixed-precision training entrypoint. Trains a proxy GPT on a byte-level
 // corpus; logs loss + tokens/sec; checkpoints periodically and resumes bit-exact.
@@ -39,6 +56,7 @@ int main(int argc, char **argv) {
   const char *ckpt = args(argc, argv, "--ckpt", "checkpoints/train.ckpt");
   int resume = has_arg(argc, argv, "--resume") != 0;
 
+  ensure_dir(ckpt);
   Model *m = model_create(cfg);
   DataLoader dl;
   data_open(&dl, data, cfg.batch, cfg.seq, 42);
