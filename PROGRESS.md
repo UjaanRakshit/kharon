@@ -8,7 +8,7 @@
 |---|-----------|-------|--------|------------------|---------|
 | 1 | Single-GPU GPT + ckpt | done | ✓ (4060 + L40S) | 0.64 ms/step 805k tok/s (L40S); 7.1 ms 72k (4060) | — |
 | 2 | FlashAttention + fused | done | ✓ FA fwd+bwd vs SDPA | FA 1.5 TFLOP/s, 0.82x cuBLAS (L40S); fusion 1.7x (4060) | beat-cuBLAS needs M3 BF16/TC |
-| 3 | BF16 + full step | benchmarked (4060) | ✓ bf16 fwd+bwd+train | learns 2.78->2.25; 150k tok/s (4060) | L40S run pending PACE login outage |
+| 3 | BF16 + full step | done | ✓ (4060 + L40S) | learns 2.58->1.42; 115k tok/s (L40S, d512x8L); resume bit-exact | — |
 | 4 | TP=2 | not started | — | — | — |
 | 5 | PP (1F1B) | not started | — | — | — |
 | 6 | TP×PP | not started | — | — | — |
@@ -35,6 +35,8 @@ States: not started / in progress / oracle-passing / benchmarked / done
 - Fused elementwise (M2): 4060 1.36-1.71x; L40S 0.96x (48MB L2 absorbs the intermediate).
 - BF16 tensor-core GEMM (M3 lever, 4060, cublasGemmEx): 3.3x vs fp32 cuBLAS,
   rel-frobenius 2.4e-3 (within bf16 tol). Resolves the M2 "needs tensor cores" gap.
+- M3 bf16 training (L40S, proxy d512 x 8L = 25M params, seq256 batch32): ~115k tok/s,
+  loss 2.58->1.42 / 1000 steps; resume bit-exact. (baseline for M4-M7 parallel speedup.)
 - M3 memory budget: bf16 mixed = 18 B/param (fp32 master 4 + bf16 weight 2 + fp32 grad 4
   + adamw m,v 8). 1.3B target -> ~23.6GB params/opt + acts; borderline on 48GB, so M3 uses
   a proxy (~d=1024 x 12L ~200M params ~3.6GB) to prove the loop; full 1B waits for M4-M7.
@@ -49,6 +51,10 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-29 (cont.3) — M3 DONE, validated on L40S (job 5348179). All 7 oracles pass;
+  bf16 training of a 25M-param proxy (d512 x 8L) learns 2.58->1.42 over 1000 steps at
+  ~115k tok/s; bit-exact bf16 resume confirmed on L40S (uninterrupted == 50+resume, loss
+  2.7497 at step 100). m3-bf16 merged. Next: M4 (TP=2 on L40S over PCIe).
 - 2026-05-29 (cont.2) — M3 bf16 FULL training step done + validated on 4060.
   bf16 backward (bf16 activation-grads, fp32 weight-grads for AdamW master) via templatized
   kernels + mm_tn_bf16 (bf16->fp32) / mm_nn_bf16o (bf16->bf16) + bf16 FA-bwd. Validation:
