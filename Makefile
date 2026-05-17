@@ -44,6 +44,17 @@ train: $(BUILD)/train.exe
 $(BUILD)/train.exe: src/train.c $(OBJ) $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
 
+# Multi-GPU (NCCL + MPI) targets — cluster only. mpicxx supplies MPI; NCCL via $NCCL_ROOT.
+MPICXX  ?= mpicxx
+NCCL_INC := $(if $(NCCL_ROOT),-I$(NCCL_ROOT)/include,)
+NCCL_LIB := $(if $(NCCL_ROOT),-L$(NCCL_ROOT)/lib,) -lnccl
+.PHONY: tp
+tp: $(BUILD)/bench_allreduce.exe
+$(BUILD)/comms.o: src/parallel/comms.cu $(HDRS) | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) -Isrc/parallel $(NCCL_INC) -ccbin $(MPICXX) -c $< -o $@
+$(BUILD)/bench_allreduce.exe: bench/bench_allreduce.c $(BUILD)/comms.o | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) $(CSTD) -Isrc/parallel $(NCCL_INC) -ccbin $(MPICXX) $< $(BUILD)/comms.o -o $@ $(NCCL_LIB)
+
 # Coarse but portable: any header change rebuilds all objects (no nvcc/MSVC -MMD).
 $(BUILD)/%.o: src/core/%.c $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) -c $< -o $@

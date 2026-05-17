@@ -26,7 +26,8 @@ One `-arch=sm_89` build serves both targets. (CONVENTIONS.md still says sm_75 fo
   `$CUDA_HOME` but does NOT add bin to PATH — prepend it:
   `module load cuda/12.6.1 gcc/12.3.0 && export PATH=$CUDA_HOME/bin:$PATH`
 - Build on RHEL9 is plain `make` (gcc host, no `-ccbin`/CCBIN). `make ARCH=sm_89`.
-- NCCL: __ (needed M4+)
-- `nvidia-smi topo -m`: 1-GPU job (node atl1-1-03-004-27) shows GPU0 CPU affinity 50-57,
-  NUMA 3. Full 8-GPU pair topology (which pairs share a PCIe switch → TP placement) needs
-  a multi-GPU allocation — capture as an M4 prereq.
+- NCCL: module `nvhpc-nccl/24.5` (also 25.5). NCCL_ROOT=.../nvhpc/24.5/.../comm_libs/nccl;
+  sets CPATH/LD_LIBRARY_PATH. Build with `-lnccl`. MPI: `openmpi/4.1.8-cuda` for bootstrap.
+- `nvidia-smi topo -m` (2× L40S, ice-gpu, node atl1-1-03-004-21): GPU0<->GPU1 = **PXB**
+  (multiple PCIe bridges, does NOT cross the host bridge/SYS), both on NUMA 0, CPU aff 0-1.
+  So a 2-GPU L40S alloc is a same-NUMA PXB PCIe pair (no NVLink) -> good for the TP=2 pair.
