@@ -17,6 +17,7 @@ endif
 
 NVCCFLAGS := -arch=$(ARCH) $(OPT) $(INC)
 LDLIBS    := -lcublas
+HDRS := $(wildcard src/core/*.h src/kernels/*.h)
 
 # On Windows, MSYS make mangles PATH for the native nvcc child, so cl.exe is not
 # found via PATH. Point nvcc at it directly with -ccbin (set by scripts/build.ps1).
@@ -24,28 +25,33 @@ ifdef CCBIN
   NVCCFLAGS += -ccbin "$(CCBIN)"
 endif
 
-CORE_C  := arena refio gpt adamw ckpt
+CORE_C  := arena refio gpt adamw ckpt data
 CORE_CU := kernels
 K_CU    := flash
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
-TESTS := test_loadref test_forward test_backward test_step test_resume test_flash
+TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
-BENCH := bench_step bench_fused bench_flash
+BENCH := bench_step bench_fused bench_flash bench_bf16
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 
-.PHONY: all tests bench clean
-all: tests bench
+.PHONY: all tests bench train clean
+all: tests bench train
 tests: $(BINS)
 bench: $(BENCHBINS)
+train: $(BUILD)/train.exe
 
-$(BUILD)/%.o: src/core/%.c | $(BUILD)
+$(BUILD)/train.exe: src/train.c $(OBJ) $(HDRS) | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
+
+# Coarse but portable: any header change rebuilds all objects (no nvcc/MSVC -MMD).
+$(BUILD)/%.o: src/core/%.c $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) -c $< -o $@
 
-$(BUILD)/%.o: src/core/%.cu | $(BUILD)
+$(BUILD)/%.o: src/core/%.cu $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: src/kernels/%.cu | $(BUILD)
+$(BUILD)/%.o: src/kernels/%.cu $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(BUILD)/%.exe: tests/%.c $(OBJ) | $(BUILD)

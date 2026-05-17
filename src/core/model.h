@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "refio.h"
+#include <stdint.h>
 
 typedef struct {
   int n_layer, d_model, n_head, vocab, seq, batch;
@@ -70,9 +71,10 @@ typedef struct {
 typedef struct {
   Config cfg;
   Arena w_arena, g_arena, a_arena, s_arena;   // params, grads, activations, bwd scratch
-  Weights w, g;
-  Acts a;
-  Bwd s;
+  Arena wb_arena, ab_arena, sb_arena;         // bf16 weights + activations + bwd scratch
+  Weights w, g, w_bf;
+  Acts a, a_bf;
+  Bwd s, s_bf;
   Arena om_arena, ov_arena;           // AdamW moment buffers (flat over params)
   float *opt_m, *opt_v;
   int step;
@@ -87,10 +89,14 @@ extern "C" {
 Model *model_create(Config cfg);
 void   model_free(Model *m);
 void   model_load_ref(Model *m, RefFile *r);   // copy reference weights -> device
+void   model_init_weights(Model *m, uint64_t seed);  // random GPT-2-style init
 void   model_set_input(Model *m, const int *idx, const int *tgt);
 float  model_forward(Model *m);                // returns loss
 void   model_backward(Model *m);
 void   model_adamw_step(Model *m, float lr, float b1, float b2, float eps, float wd);
+void   model_sync_bf16(Model *m);              // cast fp32 master weights -> bf16 compute copy
+float  model_forward_bf16(Model *m);           // bf16 mixed-precision forward (returns loss)
+void   model_backward_bf16(Model *m);          // bf16 backward; weight grads accumulate fp32
 
 #ifdef __cplusplus
 }
