@@ -231,6 +231,57 @@ void model_init_weights(Model *m, uint64_t seed) {
   fill_const(w->lnf_w, d, 1.f); fill_const(w->lnf_b, d, 0.f);
 }
 
+// Generate the FULL [Rf,Cf] normal matrix (same RNG draw as the single-GPU init),
+// then copy the [Rs,Cs] block at (r0,c0) to the device shard. Identical RNG order
+// across ranks => the shards reassemble to the same weights as single-GPU.
+static void fill_normal_block(float *dptr, int Rf, int Cf, int r0, int Rs, int c0, int Cs,
+                              float std, Rng *st) {
+  float *full = (float *)malloc((long)Rf * Cf * 4);
+  for (long i = 0; i < (long)Rf * Cf; i++) full[i] = std * rnd_normal(st);
+  float *sh = (float *)malloc((long)Rs * Cs * 4);
+  for (int i = 0; i < Rs; i++)
+    for (int j = 0; j < Cs; j++) sh[(long)i * Cs + j] = full[(long)(r0 + i) * Cf + (c0 + j)];
+  CK(cudaMemcpy(dptr, sh, (long)Rs * Cs * 4, cudaMemcpyHostToDevice));
+  free(full); free(sh);
+}
+// qkv: full [3d,d] (q,k,v stacked); rank r takes dp rows from each of q,k,v.
+static void init_qkv_shard(float *dptr, int d, int tp, int r, Rng *st) {
+  int dp = d / tp;
+  float *full = (float *)malloc((long)3 * d * d * 4);
+  for (long i = 0; i < 3L * d * d; i++) full[i] = 0.02f * rnd_normal(st);
+  float *sh = (float *)malloc((long)3 * dp * d * 4);
+  for (int part = 0; part < 3; part++)
+    for (int i = 0; i < dp; i++)
+      for (int j = 0; j < d; j++)
+        sh[((long)part * dp + i) * d + j] = full[((long)part * d + r * dp + i) * d + j];
+  CK(cudaMemcpy(dptr, sh, (long)3 * dp * d * 4, cudaMemcpyHostToDevice));
+  free(full); free(sh);
+}
+
+void model_init_weights_tp(Model *m, uint64_t seed) {
+  Config c = m->cfg;
+  int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d;
+  int tp = m->tp, r = m->rank, dp = d / tp, fo = ff / tp;
+  Rng st; rng_seed(&st, seed);
+  Weights *w = &m->w;
+  fill_normal(w->wte, (long)V * d, 0.02f, &st);   // replicated; same draw as single-GPU
+  fill_normal(w->wpe, (long)S * d, 0.02f, &st);
+  for (int l = 0; l < c.n_layer; l++) {
+    LayerW *L = &w->layer[l];
+    fill_const(L->ln1_w, d, 1.f); fill_const(L->ln1_b, d, 0.f);
+    init_qkv_shard(L->qkv_w, d, tp, r, &st);             // column-parallel
+    fill_const(L->qkv_b, 3 * dp, 0.f);
+    fill_normal_block(L->proj_w, d, d, 0, d, r * dp, dp, 0.02f, &st);   // row-parallel (cols)
+    fill_const(L->proj_b, d, 0.f);
+    fill_const(L->ln2_w, d, 1.f); fill_const(L->ln2_b, d, 0.f);
+    fill_normal_block(L->fc_w, ff, d, r * fo, fo, 0, d, 0.02f, &st);    // column-parallel (rows)
+    fill_const(L->fc_b, fo, 0.f);
+    fill_normal_block(L->fcproj_w, d, ff, 0, d, r * fo, fo, 0.02f, &st);// row-parallel (cols)
+    fill_const(L->fcproj_b, d, 0.f);
+  }
+  fill_const(w->lnf_w, d, 1.f); fill_const(w->lnf_b, d, 0.f);
+}
+
 void model_set_input(Model *m, const int *idx, const int *tgt) {
   long R = (long)m->cfg.batch * m->cfg.seq;
   CK(cudaMemcpy(m->d_idx, idx, R * 4, cudaMemcpyHostToDevice));
@@ -285,18 +336,19 @@ static void dcopy(float *dst, const float *src, long n) {
 
 void model_sync_bf16(Model *m) {
   Config c = m->cfg;
-  int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d;
+  int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d, tp = m->tp;
+  long qo = 3L * d / tp, pi = (long)d / tp, fo = (long)ff / tp;   // sharded counts
   Weights *w = &m->w, *b = &m->w_bf;
   k_f2b(w->wte, b->wte, (long)V * d);
   k_f2b(w->wpe, b->wpe, (long)S * d);
   for (int l = 0; l < c.n_layer; l++) {
     LayerW *L = &w->layer[l], *B = &b->layer[l];
     k_f2b(L->ln1_w, B->ln1_w, d); k_f2b(L->ln1_b, B->ln1_b, d);
-    k_f2b(L->qkv_w, B->qkv_w, (long)3 * d * d); k_f2b(L->qkv_b, B->qkv_b, 3 * d);
-    k_f2b(L->proj_w, B->proj_w, (long)d * d); k_f2b(L->proj_b, B->proj_b, d);
+    k_f2b(L->qkv_w, B->qkv_w, qo * d); k_f2b(L->qkv_b, B->qkv_b, qo);
+    k_f2b(L->proj_w, B->proj_w, (long)d * pi); k_f2b(L->proj_b, B->proj_b, d);
     k_f2b(L->ln2_w, B->ln2_w, d); k_f2b(L->ln2_b, B->ln2_b, d);
-    k_f2b(L->fc_w, B->fc_w, (long)ff * d); k_f2b(L->fc_b, B->fc_b, ff);
-    k_f2b(L->fcproj_w, B->fcproj_w, (long)d * ff); k_f2b(L->fcproj_b, B->fcproj_b, d);
+    k_f2b(L->fc_w, B->fc_w, fo * d); k_f2b(L->fc_b, B->fc_b, fo);
+    k_f2b(L->fcproj_w, B->fcproj_w, (long)d * fo); k_f2b(L->fcproj_b, B->fcproj_b, d);
   }
   k_f2b(w->lnf_w, b->lnf_w, d); k_f2b(w->lnf_b, b->lnf_b, d);
 }
@@ -328,6 +380,53 @@ float model_forward_bf16(Model *m) {
     mm_nt_bf16o(A->ln2, W->fc_w, A->fc, R, ff, d);
     k_bias_gelu_bf(A->fc, W->fc_b, A->fc, A->gelu, R, ff);
     mm_nt_bf16o(A->gelu, W->fcproj_w, A->fcproj, R, d, ff);
+    k_bias_residual_bf(A->fcproj, W->fcproj_b, A->res1, A->res2, R, d);
+    x = A->res2;
+  }
+  k_layernorm_fwd_bf(x, w->lnf_w, w->lnf_b, a->lnf, af->lnf_mean, af->lnf_rstd, R, d);
+  mm_nt_bf16o(a->lnf, w->wte, a->logits, R, V, d);
+  k_cross_entropy_fwd_bf(a->logits, m->d_tgt, af->probs, af->rowloss, R, V);
+
+  float *h = (float *)malloc(R * 4);
+  CK(cudaMemcpy(h, af->rowloss, R * 4, cudaMemcpyDeviceToHost));
+  double s = 0;
+  for (long i = 0; i < R; i++) s += h[i];
+  free(h);
+  m->loss = (float)(s / R);
+  return m->loss;
+}
+
+// Tensor-parallel bf16 forward. Column-parallel qkv/fc (output sharded, no comm);
+// row-parallel proj/fcproj (input sharded, output all-reduced). Embeddings, LNs,
+// head replicated. tp=1 with allreduce==NULL is identical to model_forward_bf16.
+float model_forward_tp(Model *m) {
+  Config c = m->cfg;
+  int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d, T = c.seq, B = c.batch;
+  int tp = m->tp, dp = d / tp, Hp = H / tp, qo = 3 * d / tp, fo = ff / tp;
+  long R = (long)B * T;
+  float scale = 1.f / sqrtf((float)hd);
+  Weights *w = &m->w_bf;
+  Acts *a = &m->a_bf, *af = &m->a;
+
+  k_embed_bf(w->wte, w->wpe, m->d_idx, a->emb, B, T, d);
+  void *x = a->emb;
+  for (int l = 0; l < c.n_layer; l++) {
+    LayerW *W = &w->layer[l];
+    LayerAct *A = &a->layer[l], *F = &af->layer[l];
+    k_layernorm_fwd_bf(x, W->ln1_w, W->ln1_b, A->ln1, F->ln1_mean, F->ln1_rstd, R, d);
+    mm_nt_bf16o(A->ln1, W->qkv_w, A->qkv, R, qo, d);           // col-parallel
+    k_add_bias_bf(A->qkv, W->qkv_b, R, qo);
+    k_split_heads_bf(A->qkv, A->q, A->k, A->v, B, T, Hp, hd);
+    flash_attn_fwd_bf(A->q, A->k, A->v, A->atto, F->lse, B, Hp, T, hd, scale);
+    k_merge_heads_bf(A->atto, A->atto_m, B, T, Hp, hd);
+    mm_nt_bf16o(A->atto_m, W->proj_w, A->proj, R, d, dp);      // row-parallel (partial)
+    if (m->allreduce_bf16) m->allreduce_bf16(m->ar_ctx, A->proj, R * d);
+    k_bias_residual_bf(A->proj, W->proj_b, x, A->res1, R, d);
+    k_layernorm_fwd_bf(A->res1, W->ln2_w, W->ln2_b, A->ln2, F->ln2_mean, F->ln2_rstd, R, d);
+    mm_nt_bf16o(A->ln2, W->fc_w, A->fc, R, fo, d);             // col-parallel
+    k_bias_gelu_bf(A->fc, W->fc_b, A->fc, A->gelu, R, fo);
+    mm_nt_bf16o(A->gelu, W->fcproj_w, A->fcproj, R, d, fo);    // row-parallel (partial)
+    if (m->allreduce_bf16) m->allreduce_bf16(m->ar_ctx, A->fcproj, R * d);
     k_bias_residual_bf(A->fcproj, W->fcproj_b, A->res1, A->res2, R, d);
     x = A->res2;
   }
@@ -397,6 +496,67 @@ void model_backward_bf16(Model *m) {
     k_colsum_bf(s->qkv, gL->qkv_b, R, 3 * d);
     mm_tn_bf16(s->qkv, A->ln1, gL->qkv_w, 3 * d, d, R);
     mm_nn_bf16o(s->qkv, W->qkv_w, s->ln1, R, d, 3 * d);
+    k_layernorm_bwd_bf(s->ln1, xin, W->ln1_w, F->ln1_mean, F->ln1_rstd,
+                       s->lntmp, gL->ln1_w, gL->ln1_b, R, d);
+    k_add_bf(s->dx, s->lntmp, s->dx, RD);
+  }
+  k_embed_bwd_wte_bf(s->dx, m->d_idx, g->wte, R, V, d);
+  k_embed_bwd_wpe_bf(s->dx, g->wpe, B, T, d);
+}
+
+// Tensor-parallel bf16 backward. Conjugate of forward: row-parallel (proj/fcproj)
+// bwd is local; column-parallel (qkv/fc) bwd all-reduces the input grad. Replicated
+// weights get identical grads on every rank (no comm). tp=1 == model_backward_bf16.
+void model_backward_tp(Model *m) {
+  Config c = m->cfg;
+  int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d, T = c.seq, B = c.batch;
+  int tp = m->tp, dp = d / tp, Hp = H / tp, qo = 3 * d / tp, fo = ff / tp;
+  long R = (long)B * T, RD = R * d;
+  float scale = 1.f / sqrtf((float)hd);
+  Weights *w = &m->w_bf, *g = &m->g;
+  Acts *a = &m->a_bf, *af = &m->a;
+  Bwd *s = &m->s_bf;
+
+  CK(cudaMemset(m->g_arena.base, 0, m->g_arena.off));
+
+  k_cross_entropy_bwd_bf(af->probs, m->d_tgt, s->logits, R, V, 1.f / R);
+  mm_nn_bf16o(s->logits, w->wte, s->lnf, R, d, V);          // d_lnf (replicated)
+  mm_tn_bf16(s->logits, a->lnf, g->wte, V, d, R);           // d_wte head part (replicated)
+
+  void *xlast = c.n_layer ? a->layer[c.n_layer - 1].res2 : a->emb;
+  k_layernorm_bwd_bf(s->lnf, xlast, w->lnf_w, af->lnf_mean, af->lnf_rstd,
+                     s->dx, g->lnf_w, g->lnf_b, R, d);
+
+  for (int l = c.n_layer - 1; l >= 0; l--) {
+    LayerW *W = &w->layer[l], *gL = &g->layer[l];
+    LayerAct *A = &a->layer[l], *F = &af->layer[l];
+    void *xin = l ? a->layer[l - 1].res2 : a->emb;
+
+    dcopyb(s->res1, s->dx, RD);
+    dcopyb(s->fcproj, s->dx, RD);
+    k_colsum_bf(s->fcproj, gL->fcproj_b, R, d);             // replicated bias grad
+    mm_tn_bf16(s->fcproj, A->gelu, gL->fcproj_w, d, fo, R); // sharded weight grad
+    mm_nn_bf16o(s->fcproj, W->fcproj_w, s->gelu, R, fo, d); // row-parallel bwd: local
+    k_gelu_bwd_bf(A->fc, s->gelu, s->fc, R * fo);
+    k_colsum_bf(s->fc, gL->fc_b, R, fo);                    // sharded bias grad
+    mm_tn_bf16(s->fc, A->ln2, gL->fc_w, fo, d, R);          // sharded weight grad
+    mm_nn_bf16o(s->fc, W->fc_w, s->ln2, R, d, fo);          // col-parallel bwd -> partial d_ln2
+    if (m->allreduce_bf16) m->allreduce_bf16(m->ar_ctx, s->ln2, R * d);
+    k_layernorm_bwd_bf(s->ln2, A->res1, W->ln2_w, F->ln2_mean, F->ln2_rstd,
+                       s->lntmp, gL->ln2_w, gL->ln2_b, R, d);
+    k_add_bf(s->res1, s->lntmp, s->res1, RD);
+    dcopyb(s->dx, s->res1, RD);
+    dcopyb(s->proj, s->res1, RD);
+    k_colsum_bf(s->proj, gL->proj_b, R, d);                 // replicated bias grad
+    mm_tn_bf16(s->proj, A->atto_m, gL->proj_w, d, dp, R);   // sharded weight grad
+    mm_nn_bf16o(s->proj, W->proj_w, s->atto_m, R, dp, d);   // row-parallel bwd: local
+    k_unmerge_heads_bf(s->atto_m, s->atto, B, T, Hp, hd);
+    flash_attn_bwd_bf(A->q, A->k, A->v, A->atto, F->lse, s->atto, s->q, s->k, s->v, B, Hp, T, hd, scale);
+    k_combine_qkv_bf(s->q, s->k, s->v, s->qkv, B, T, Hp, hd);
+    k_colsum_bf(s->qkv, gL->qkv_b, R, qo);                  // sharded bias grad
+    mm_tn_bf16(s->qkv, A->ln1, gL->qkv_w, qo, d, R);        // sharded weight grad
+    mm_nn_bf16o(s->qkv, W->qkv_w, s->ln1, R, d, qo);        // col-parallel bwd -> partial d_ln1
+    if (m->allreduce_bf16) m->allreduce_bf16(m->ar_ctx, s->ln1, R * d);
     k_layernorm_bwd_bf(s->ln1, xin, W->ln1_w, F->ln1_mean, F->ln1_rstd,
                        s->lntmp, gL->ln1_w, gL->ln1_b, R, d);
     k_add_bf(s->dx, s->lntmp, s->dx, RD);
