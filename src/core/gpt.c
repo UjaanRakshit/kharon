@@ -12,8 +12,12 @@
 // float* but for bf16 they hold bf16 addresses (only ever passed to _bf launchers
 // as void*). Reduction stats (mean/rstd/lse/probs/rowloss) are always read from
 // the fp32 acts, so their bf16-arena copies are unused.
-static void layout_weights(Arena *ar, Config c, Weights *w, int es) {
+// tp = tensor-parallel size. Column-parallel (qkv,fc) shard output; row-parallel
+// (proj,fcproj) shard input. Embeddings, LayerNorms, proj/fcproj bias stay full.
+// tp=1 -> identical to the single-GPU layout.
+static void layout_weights(Arena *ar, Config c, Weights *w, int es, int tp) {
   int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d;
+  int qo = 3 * d / tp, pi = d / tp, fo = ff / tp, fpi = ff / tp;
   w->wte = (float *)arena_alloc(ar, (long)V * d * es);
   w->wpe = (float *)arena_alloc(ar, (long)S * d * es);
   w->layer = (LayerW *)malloc(c.n_layer * sizeof(LayerW));
@@ -21,12 +25,12 @@ static void layout_weights(Arena *ar, Config c, Weights *w, int es) {
   for (int l = 0; l < c.n_layer; l++) {
     LayerW *L = &w->layer[l];
     L->ln1_w = (float *)arena_alloc(ar, d * es);     L->ln1_b = (float *)arena_alloc(ar, d * es);
-    L->qkv_w = (float *)arena_alloc(ar, (long)3 * d * d * es); L->qkv_b = (float *)arena_alloc(ar, 3 * d * es);
-    L->proj_w = (float *)arena_alloc(ar, (long)d * d * es);    L->proj_b = (float *)arena_alloc(ar, d * es);
+    L->qkv_w = (float *)arena_alloc(ar, (long)qo * d * es); L->qkv_b = (float *)arena_alloc(ar, qo * es);
+    L->proj_w = (float *)arena_alloc(ar, (long)d * pi * es); L->proj_b = (float *)arena_alloc(ar, d * es);
     L->ln2_w = (float *)arena_alloc(ar, d * es);     L->ln2_b = (float *)arena_alloc(ar, d * es);
-    L->fc_w = (float *)arena_alloc(ar, (long)ff * d * es);     L->fc_b = (float *)arena_alloc(ar, ff * es);
-    L->fcproj_w = (float *)arena_alloc(ar, (long)d * ff * es); L->fcproj_b = (float *)arena_alloc(ar, d * es);
-    np += 4 * d + 3L * d * d + 3 * d + (long)d * d + d + (long)ff * d + ff + (long)d * ff + d;
+    L->fc_w = (float *)arena_alloc(ar, (long)fo * d * es);  L->fc_b = (float *)arena_alloc(ar, fo * es);
+    L->fcproj_w = (float *)arena_alloc(ar, (long)d * fpi * es); L->fcproj_b = (float *)arena_alloc(ar, d * es);
+    np += 4 * d + (long)qo * d + qo + (long)d * pi + d + (long)fo * d + fo + (long)d * fpi + d;
   }
   w->lnf_w = (float *)arena_alloc(ar, d * es);
   w->lnf_b = (float *)arena_alloc(ar, d * es);
@@ -35,29 +39,30 @@ static void layout_weights(Arena *ar, Config c, Weights *w, int es) {
   w->n_param = (int)np;
 }
 
-static void layout_acts(Arena *ar, Config c, Acts *a, int es) {
-  int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d;
-  long R = (long)c.batch * c.seq, T = c.seq, BHT2 = (long)c.batch * H * T * T;
+static void layout_acts(Arena *ar, Config c, Acts *a, int es, int tp) {
+  int d = c.d_model, H = c.n_head, V = c.vocab, ff = 4 * d;
+  int dp = d / tp, qo = 3 * d / tp, fo = ff / tp, Hp = H / tp;
+  long R = (long)c.batch * c.seq, T = c.seq, BHT2 = (long)c.batch * Hp * T * T;
   a->emb = (float *)arena_alloc(ar, R * d * es);
   a->layer = (LayerAct *)malloc(c.n_layer * sizeof(LayerAct));
   for (int l = 0; l < c.n_layer; l++) {
     LayerAct *A = &a->layer[l];
     A->ln1_mean = (float *)arena_alloc(ar, R * 4); A->ln1_rstd = (float *)arena_alloc(ar, R * 4);
-    A->ln1 = (float *)arena_alloc(ar, R * d * es);
-    A->qkv = (float *)arena_alloc(ar, R * 3 * d * es);
-    A->q = (float *)arena_alloc(ar, R * d * es); A->k = (float *)arena_alloc(ar, R * d * es);
-    A->v = (float *)arena_alloc(ar, R * d * es);
+    A->ln1 = (float *)arena_alloc(ar, R * d * es);              // replicated
+    A->qkv = (float *)arena_alloc(ar, R * qo * es);             // sharded (col)
+    A->q = (float *)arena_alloc(ar, R * dp * es); A->k = (float *)arena_alloc(ar, R * dp * es);
+    A->v = (float *)arena_alloc(ar, R * dp * es);
     A->att = (float *)arena_alloc(ar, BHT2 * es);
-    A->lse = (float *)arena_alloc(ar, (long)c.batch * H * T * 4);
-    A->atto = (float *)arena_alloc(ar, R * d * es);
-    A->atto_m = (float *)arena_alloc(ar, R * d * es);
-    A->proj = (float *)arena_alloc(ar, R * d * es);
+    A->lse = (float *)arena_alloc(ar, (long)c.batch * Hp * T * 4);
+    A->atto = (float *)arena_alloc(ar, R * dp * es);
+    A->atto_m = (float *)arena_alloc(ar, R * dp * es);
+    A->proj = (float *)arena_alloc(ar, R * d * es);             // replicated (row out)
     A->res1 = (float *)arena_alloc(ar, R * d * es);
     A->ln2_mean = (float *)arena_alloc(ar, R * 4); A->ln2_rstd = (float *)arena_alloc(ar, R * 4);
     A->ln2 = (float *)arena_alloc(ar, R * d * es);
-    A->fc = (float *)arena_alloc(ar, R * ff * es);
-    A->gelu = (float *)arena_alloc(ar, R * ff * es);
-    A->fcproj = (float *)arena_alloc(ar, R * d * es);
+    A->fc = (float *)arena_alloc(ar, R * fo * es);              // sharded (col)
+    A->gelu = (float *)arena_alloc(ar, R * fo * es);
+    A->fcproj = (float *)arena_alloc(ar, R * d * es);           // replicated (row out)
     A->res2 = (float *)arena_alloc(ar, R * d * es);
   }
   a->lnf_mean = (float *)arena_alloc(ar, R * 4); a->lnf_rstd = (float *)arena_alloc(ar, R * 4);
@@ -67,61 +72,71 @@ static void layout_acts(Arena *ar, Config c, Acts *a, int es) {
   a->rowloss = (float *)arena_alloc(ar, R * 4);
 }
 
-static void layout_scratch(Arena *ar, Config c, Bwd *s, int es) {
+static void layout_scratch(Arena *ar, Config c, Bwd *s, int es, int tp) {
   int d = c.d_model, ff = 4 * d, V = c.vocab, H = c.n_head;
-  long R = (long)c.batch * c.seq, T = c.seq, BHT2 = (long)c.batch * H * T * T;
-  float **rd[] = {&s->dx, &s->res1, &s->proj, &s->fcproj, &s->lntmp, &s->ln1, &s->ln2,
-                  &s->atto_m, &s->atto, &s->q, &s->k, &s->v, &s->lnf};
-  for (int i = 0; i < (int)(sizeof(rd) / sizeof(rd[0])); i++)
-    *rd[i] = (float *)arena_alloc(ar, R * d * es);
-  s->fc = (float *)arena_alloc(ar, R * ff * es);
-  s->gelu = (float *)arena_alloc(ar, R * ff * es);
+  int dp = d / tp, qo = 3 * d / tp, fo = ff / tp, Hp = H / tp;
+  long R = (long)c.batch * c.seq, T = c.seq, BHT2 = (long)c.batch * Hp * T * T;
+  float **full[] = {&s->dx, &s->res1, &s->proj, &s->fcproj, &s->lntmp, &s->ln1, &s->ln2, &s->lnf};
+  for (int i = 0; i < (int)(sizeof(full) / sizeof(full[0])); i++)
+    *full[i] = (float *)arena_alloc(ar, R * d * es);
+  float **shard[] = {&s->atto_m, &s->atto, &s->q, &s->k, &s->v};
+  for (int i = 0; i < (int)(sizeof(shard) / sizeof(shard[0])); i++)
+    *shard[i] = (float *)arena_alloc(ar, R * dp * es);
+  s->fc = (float *)arena_alloc(ar, R * fo * es);
+  s->gelu = (float *)arena_alloc(ar, R * fo * es);
   s->att = (float *)arena_alloc(ar, BHT2 * es);
   s->scores = (float *)arena_alloc(ar, BHT2 * es);
-  s->qkv = (float *)arena_alloc(ar, R * 3 * d * es);
+  s->qkv = (float *)arena_alloc(ar, R * qo * es);
   s->logits = (float *)arena_alloc(ar, R * V * es);
 }
 
-static long scratch_bytes(Config c) {
+static long scratch_bytes(Config c, int tp) {
   int d = c.d_model, ff = 4 * d, V = c.vocab, H = c.n_head;
+  int dp = d / tp, qo = 3 * d / tp, fo = ff / tp, Hp = H / tp;
   long R = (long)c.batch * c.seq, T = c.seq;
-  return (13 * R * d + 2 * R * ff + (long)c.batch * H * T * T * 2 + R * 3 * d + R * V) * 4;
+  return (8 * R * d + 5 * R * dp + 2 * R * fo + (long)c.batch * Hp * T * T * 2 + R * qo + R * V) * 4;
 }
 
-static long weight_bytes(Config c) {
+static long weight_bytes(Config c, int tp) {
   int d = c.d_model, V = c.vocab, S = c.seq, ff = 4 * d;
-  long per = 4L * d + 3L * d * d + 3 * d + (long)d * d + d + (long)ff * d + ff + (long)d * ff + d;
+  int qo = 3 * d / tp, pi = d / tp, fo = ff / tp, fpi = ff / tp;
+  long per = 4L * d + (long)qo * d + qo + (long)d * pi + d + (long)fo * d + fo + (long)d * fpi + d;
   return ((long)V * d + (long)S * d + c.n_layer * per + 2 * d) * 4;
 }
-static long act_bytes(Config c) {
+static long act_bytes(Config c, int tp) {
   int d = c.d_model, H = c.n_head, V = c.vocab, ff = 4 * d;
+  int dp = d / tp, qo = 3 * d / tp, fo = ff / tp, Hp = H / tp;
   long R = (long)c.batch * c.seq, T = c.seq;
-  long per = 2 * R + R * d + R * 3 * d + 3 * R * d + (long)c.batch * H * T * T + (long)c.batch * H * T
-           + R * d + R * d + R * d + R * d + 2 * R + R * d + R * ff + R * ff + R * d + R * d;
+  long per = 2 * R + R * d + R * qo + 3 * R * dp + (long)c.batch * Hp * T * T + (long)c.batch * Hp * T
+           + R * dp + R * dp + R * d + R * d + 2 * R + R * d + R * fo + R * fo + R * d + R * d;
   return (R * d + c.n_layer * per + 2 * R + R * d + R * V + R * V + R) * 4;
 }
 
 // ---- lifecycle ---------------------------------------------------------------
-Model *model_create(Config cfg) {
+Model *model_create(Config cfg) { return model_create_tp(cfg, 1, 0); }
+
+Model *model_create_tp(Config cfg, int tp, int rank) {
   Model *m = (Model *)calloc(1, sizeof(Model));
   m->cfg = cfg;
-  long wb = weight_bytes(cfg), ab = act_bytes(cfg);
+  m->tp = tp;
+  m->rank = rank;
+  long wb = weight_bytes(cfg, tp), ab = act_bytes(cfg, tp);
   long slack = 1 << 18;
-  long sb = scratch_bytes(cfg);
+  long sb = scratch_bytes(cfg, tp);
   m->w_arena = arena_create("params", wb + slack, 1);
   m->g_arena = arena_create("grads", wb + slack, 1);
   m->a_arena = arena_create("acts", ab + slack, 1);
   m->s_arena = arena_create("bwd", sb + slack, 1);
-  layout_weights(&m->w_arena, cfg, &m->w, 4);
-  layout_weights(&m->g_arena, cfg, &m->g, 4);
-  layout_acts(&m->a_arena, cfg, &m->a, 4);
-  layout_scratch(&m->s_arena, cfg, &m->s, 4);
+  layout_weights(&m->w_arena, cfg, &m->w, 4, tp);
+  layout_weights(&m->g_arena, cfg, &m->g, 4, tp);
+  layout_acts(&m->a_arena, cfg, &m->a, 4, tp);
+  layout_scratch(&m->s_arena, cfg, &m->s, 4, tp);
   m->wb_arena = arena_create("wbf16", wb / 2 + slack, 1);
   m->ab_arena = arena_create("abf16", ab + slack, 1);   // bf16 acts but fp32 stats don't halve
   m->sb_arena = arena_create("sbf16", sb / 2 + slack, 1);
-  layout_weights(&m->wb_arena, cfg, &m->w_bf, 2);
-  layout_acts(&m->ab_arena, cfg, &m->a_bf, 2);
-  layout_scratch(&m->sb_arena, cfg, &m->s_bf, 2);
+  layout_weights(&m->wb_arena, cfg, &m->w_bf, 2, tp);
+  layout_acts(&m->ab_arena, cfg, &m->a_bf, 2, tp);
+  layout_scratch(&m->sb_arena, cfg, &m->s_bf, 2, tp);
   // optimizer moments are flat over the whole param arena (identical layout)
   long pbytes = m->w_arena.off;
   m->om_arena = arena_create("adam_m", pbytes, 1);
