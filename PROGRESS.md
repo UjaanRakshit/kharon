@@ -9,7 +9,7 @@
 | 1 | Single-GPU GPT + ckpt | done | ✓ (4060 + L40S) | 0.64 ms/step 805k tok/s (L40S); 7.1 ms 72k (4060) | — |
 | 2 | FlashAttention + fused | done | ✓ FA fwd+bwd vs SDPA | FA 1.5 TFLOP/s, 0.82x cuBLAS (L40S); fusion 1.7x (4060) | beat-cuBLAS needs M3 BF16/TC |
 | 3 | BF16 + full step | done | ✓ (4060 + L40S) | learns 2.58->1.42; 115k tok/s (L40S, d512x8L); resume bit-exact | — |
-| 4 | TP=2 | not started | — | — | — |
+| 4 | TP=2 | done | ✓ loss curve matches single-GPU | comms 23.2% of step; 1.33x tok/s on 2x L40S | overlap is future (TP all-reduce on critical path) |
 | 5 | PP (1F1B) | not started | — | — | — |
 | 6 | TP×PP | not started | — | — | — |
 | 7 | +ZeRO-1 DP (8 GPU) | not started | — | — | — |
@@ -43,7 +43,13 @@ States: not started / in progress / oracle-passing / benchmarked / done
 - FlashAttention vs official: __ (deferred to M3 — official FA is BF16/tensor-core)
 - Custom GEMM vs cuBLAS (shape __): __
 - Bubble fraction @ m=__ microbatches: __
-- TP=2 comms/compute overlap (L40S PCIe): __
+- NCCL all-reduce bus bw (2x L40S, PCIe PXB, no NVLink): ~21 GB/s large msgs, ~2 GB/s @16KB
+  (latency-bound small -> bandwidth-bound large). Headline interconnect ceiling for TP.
+- TP=2 (2x L40S PCIe, proxy d512 x 8L, bf16): loss curve matches single-GPU to ~3e-3 (bf16).
+  Step 53.0 ms = 40.7 compute + 12.3 comms (23.2% in collectives). 154k tok/s vs 117k
+  single-GPU = 1.33x on 2 GPUs (sublinear: PCIe all-reduce + replicated LN/embed/head).
+  Overlap: ~0% in vanilla TP (all-reduce output consumed immediately); async comms hook
+  exists for future sequence-parallel/overlap work. This is the PCIe-no-NVLink finding.
 - A100-NVLink vs L40S-PCIe TP=2: __
 - Full 8-GPU mesh tokens/sec & MFU: __
 - vs Megatron-LM same config: __
@@ -51,6 +57,22 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-29 (cont.5) — M4 DONE, validated on 2x L40S (job 5348274). Megatron TP=2:
+  column-parallel qkv/fc, row-parallel proj/fcproj, 2 all-reduces/way (NCCL callback);
+  embeddings/LN/head replicated. tp=1 bit-matches single-GPU (test_tp1); tp=2 loss curve
+  tracks single-GPU to ~3e-3 (bf16). Comms 23.2% of step (PCIe, no NVLink); 1.33x tok/s on
+  2 GPUs (sublinear = the finding). Parametrized model layout by tp; TP fwd/bwd reuse the
+  bf16 kernels; AdamW/ckpt reuse flat arenas. m4-tp merged. Next: M5 (pipeline parallel 1F1B).
+- 2026-05-29 (cont.4) — M4 started (branch m4-tp). Foundation done: confirmed NCCL
+  (nvhpc-nccl/24.5) + L40S topo (GPU0<->GPU1 PXB, NUMA0); wrote src/parallel/comms.{h,cu}
+  (NCCL+MPI process-per-GPU, all-reduce fp32/bf16, async variant for overlap); validated
+  on 2x L40S (correctness ok, ~21 GB/s bus bw large / ~2 GB/s @16KB). Build: `make tp` with
+  -ccbin mpicxx + $NCCL_ROOT; launch mpirun -n2 (scripts/ice_m4_comms.sbatch).
+  NEXT (the big chunk): Megatron TP=2 sharded model — column-parallel qkv/fc (no fwd comm,
+  all-reduce on dx in bwd), row-parallel proj/fcproj (all-reduce out in fwd, none in bwd);
+  embeddings+head replicated; 2 all-reduces/layer each way. Build a tp_model + tp train/test
+  launched mpirun -n2, oracle vs single-GPU M3 path (bf16 tol, loss curve), then measure
+  collective time + overlap (async all-reduce on comms stream) + tokens/sec vs 1-GPU; merge.
 - 2026-05-29 (cont.3) — M3 DONE, validated on L40S (job 5348179). All 7 oracles pass;
   bf16 training of a 25M-param proxy (d512 x 8L) learns 2.58->1.42 over 1000 steps at
   ~115k tok/s; bit-exact bf16 resume confirmed on L40S (uninterrupted == 50+resume, loss

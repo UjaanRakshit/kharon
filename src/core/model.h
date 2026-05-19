@@ -80,6 +80,12 @@ typedef struct {
   int step;
   int *d_idx, *d_tgt;                 // device input/target [BT]
   float loss;
+  // tensor parallelism: tp ranks shard qkv/fc (column) and proj/fcproj (row).
+  // tp=1 (default) is the unchanged single-GPU path. The all-reduce is a callback
+  // so the single-GPU build links no NCCL; the TP entrypoint supplies it.
+  int tp, rank;
+  void (*allreduce_bf16)(void *ctx, void *buf, long n);
+  void *ar_ctx;
 } Model;
 
 #ifdef __cplusplus
@@ -87,6 +93,7 @@ extern "C" {
 #endif
 
 Model *model_create(Config cfg);
+Model *model_create_tp(Config cfg, int tp, int rank);
 void   model_free(Model *m);
 void   model_load_ref(Model *m, RefFile *r);   // copy reference weights -> device
 void   model_init_weights(Model *m, uint64_t seed);  // random GPT-2-style init
@@ -97,6 +104,10 @@ void   model_adamw_step(Model *m, float lr, float b1, float b2, float eps, float
 void   model_sync_bf16(Model *m);              // cast fp32 master weights -> bf16 compute copy
 float  model_forward_bf16(Model *m);           // bf16 mixed-precision forward (returns loss)
 void   model_backward_bf16(Model *m);          // bf16 backward; weight grads accumulate fp32
+// tensor-parallel (tp>1) bf16 path; all-reduce via m->allreduce_bf16 callback
+void   model_init_weights_tp(Model *m, uint64_t seed);
+float  model_forward_tp(Model *m);
+void   model_backward_tp(Model *m);
 
 #ifdef __cplusplus
 }
