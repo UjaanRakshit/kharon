@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
   const char *path = argc > 1 ? argv[1] : "tests/m1_ref.bin";
   RefFile *r = ref_load(path);
   Config cfg = {r->n_layer, r->d_model, r->n_head, r->vocab, r->seq, r->batch};
-  Model *m = model_create_pp(cfg, 1, 1);             // P=1: first and last
+  Model *m = model_create_pp(cfg, 1, 1, 1);          // P=1: first and last, 1 slot
   model_init_weights_pp(m, 1337, 0, cfg.n_layer);
   model_set_input(m, ref_i32(r, "input_ids"), ref_i32(r, "targets"));
   long ng = m->g_arena.off / 4;

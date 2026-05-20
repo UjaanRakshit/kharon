@@ -158,15 +158,27 @@ Model *model_create_tp(Config cfg, int tp, int rank) { return model_alloc(cfg, t
 
 // Pipeline stage: stage_cfg.n_layer = this stage's layer count. Last stage gets the
 // untied head; non-last stages allocate xin/dxout staging buffers for the scheduler.
-Model *model_create_pp(Config stage_cfg, int first, int last) {
+Model *model_create_pp(Config stage_cfg, int first, int last, int nslots) {
   Model *m = model_alloc(stage_cfg, 1, 0, last);
   m->pp_first = first;
   m->pp_last = last;
   long bt_d = (long)stage_cfg.batch * stage_cfg.seq * stage_cfg.d_model * 2;  // bf16 [B,T,d]
   if (!first) CK(cudaMalloc(&m->pp_xin, bt_d));     // recv activation here
   if (!last) CK(cudaMalloc(&m->pp_dxout, bt_d));    // recv grad-of-output here
+  if (nslots > 8) DIE("model_create_pp: nslots %d > 8", nslots);
+  m->pp_nslots = nslots;
+  m->cur_slot = 0;
+  long ab = act_bytes(stage_cfg, 1), slack = 1 << 18;
+  m->a_slot[0] = m->a; m->a_bf_slot[0] = m->a_bf;   // slot 0 aliases base acts
+  for (int s = 1; s < nslots; s++) {
+    m->a_slot_ar[s] = arena_create("acts_s", ab + slack, 1);
+    m->ab_slot_ar[s] = arena_create("abf_s", ab + slack, 1);
+    layout_acts(&m->a_slot_ar[s], stage_cfg, &m->a_slot[s], 4, 1);
+    layout_acts(&m->ab_slot_ar[s], stage_cfg, &m->a_bf_slot[s], 2, 1);
+  }
   return m;
 }
+void model_set_slot(Model *m, int slot) { m->cur_slot = slot; }
 
 void model_free(Model *m) {
   if (!m) return;
@@ -177,6 +189,10 @@ void model_free(Model *m) {
   arena_destroy(&m->om_arena); arena_destroy(&m->ov_arena);
   arena_destroy(&m->wb_arena); arena_destroy(&m->ab_arena); arena_destroy(&m->sb_arena);
   cudaFree(m->pp_xin); cudaFree(m->pp_dxout);
+  for (int s = 1; s < m->pp_nslots; s++) {
+    arena_destroy(&m->a_slot_ar[s]); arena_destroy(&m->ab_slot_ar[s]);
+    free(m->a_slot[s].layer); free(m->a_bf_slot[s].layer);
+  }
   free(m->w.layer); free(m->g.layer); free(m->a.layer);
   free(m->w_bf.layer); free(m->a_bf.layer);
   free(m);
@@ -624,10 +640,11 @@ float model_forward_pp(Model *m, void *xout) {
   long R = (long)B * T;
   float scale = 1.f / sqrtf((float)hd);
   Weights *w = &m->w_bf;
-  Acts *a = &m->a_bf, *af = &m->a;
-  void *x;
-  if (m->pp_first) { k_embed_bf(w->wte, w->wpe, m->d_idx, a->emb, B, T, d); x = a->emb; }
-  else x = m->pp_xin;
+  Acts *a = &m->a_bf_slot[m->cur_slot], *af = &m->a_slot[m->cur_slot];
+  // stage input always lands in this slot's emb buffer (stashed for backward's LN)
+  if (m->pp_first) k_embed_bf(w->wte, w->wpe, m->d_idx, a->emb, B, T, d);
+  else dcopyb(a->emb, m->pp_xin, R * d);
+  void *x = a->emb;
   for (int l = 0; l < c.n_layer; l++) {
     LayerW *W = &w->layer[l];
     LayerAct *A = &a->layer[l], *F = &af->layer[l];
@@ -650,6 +667,7 @@ float model_forward_pp(Model *m, void *xout) {
   k_layernorm_fwd_bf(x, w->lnf_w, w->lnf_b, a->lnf, af->lnf_mean, af->lnf_rstd, R, d);
   mm_nt_bf16o(a->lnf, w->head_w, a->logits, R, V, d);
   k_cross_entropy_fwd_bf(a->logits, m->d_tgt, af->probs, af->rowloss, R, V);
+  if (m->pp_skip_loss) return 0.f;                 // timing run: avoid the host sync
   float *h = (float *)malloc(R * 4);
   CK(cudaMemcpy(h, af->rowloss, R * 4, cudaMemcpyDeviceToHost));
   double s = 0;
@@ -667,7 +685,7 @@ void model_backward_pp(Model *m, void *dxin, float inv_mb) {
   long R = (long)B * T, RD = R * d;
   float scale = 1.f / sqrtf((float)hd);
   Weights *w = &m->w_bf, *g = &m->g;
-  Acts *a = &m->a_bf, *af = &m->a;
+  Acts *a = &m->a_bf_slot[m->cur_slot], *af = &m->a_slot[m->cur_slot];
   Bwd *s = &m->s_bf;
 
   if (m->pp_last) {
@@ -683,7 +701,7 @@ void model_backward_pp(Model *m, void *dxin, float inv_mb) {
   for (int l = c.n_layer - 1; l >= 0; l--) {
     LayerW *W = &w->layer[l], *gL = &g->layer[l];
     LayerAct *A = &a->layer[l], *F = &af->layer[l];
-    void *xin = l ? a->layer[l - 1].res2 : (m->pp_first ? a->emb : m->pp_xin);
+    void *xin = l ? a->layer[l - 1].res2 : a->emb;   // slot's stashed stage input
     dcopyb(s->res1, s->dx, RD);
     dcopyb(s->fcproj, s->dx, RD);
     k_colsum_bf(s->fcproj, gL->fcproj_b, R, d);
