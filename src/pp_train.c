@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
     model_sync_bf16(m);
     model_zero_grads(m);
     float lsum = 0; int fwd = 0, bwd = 0;
-    for (int i = 0; i < num_warmup; i++) FWD(fwd), fwd++;
+    for (int i = 0; i < num_warmup; i++) { FWD(fwd); fwd++; }
     while (fwd < M) { FWD(fwd); fwd++; BWD(bwd); bwd++; }
     while (bwd < M) { BWD(bwd); bwd++; }
     comms_sync_default(&c);
@@ -92,12 +92,12 @@ int main(int argc, char **argv) {
   // full pipeline step
   int K = 20; float lsum = 0; (void)lsum;
   for (int w = 0; w < 3; w++) { int fwd = 0, bwd = 0;
-    for (int i = 0; i < num_warmup; i++) FWD(fwd), fwd++;
+    for (int i = 0; i < num_warmup; i++) { FWD(fwd); fwd++; }
     while (fwd < M) { FWD(fwd); fwd++; BWD(bwd); bwd++; } while (bwd < M) { BWD(bwd); bwd++; }
     comms_sync_default(&c); }
   CK(cudaEventRecord(a, 0));
   for (int k = 0; k < K; k++) { int fwd = 0, bwd = 0;
-    for (int i = 0; i < num_warmup; i++) FWD(fwd), fwd++;
+    for (int i = 0; i < num_warmup; i++) { FWD(fwd); fwd++; }
     while (fwd < M) { FWD(fwd); fwd++; BWD(bwd); bwd++; } while (bwd < M) { BWD(bwd); bwd++; }
     comms_sync_default(&c); }
   CK(cudaEventRecord(b, 0)); CK(cudaEventSynchronize(b));
