@@ -52,3 +52,22 @@ void comms_allreduce_bf16_async(Comms *c, void *buf, long n) {
                         (cudaStream_t)c->stream));
 }
 void comms_wait(Comms *c) { CK(cudaStreamSynchronize((cudaStream_t)c->stream)); }
+
+void comms_send_bf16(Comms *c, void *buf, long n, int peer) {
+  NCCL_CK(ncclGroupStart());
+  NCCL_CK(ncclSend(buf, n, ncclBfloat16, peer, (ncclComm_t)c->comm, 0));
+  NCCL_CK(ncclGroupEnd());
+}
+void comms_recv_bf16(Comms *c, void *buf, long n, int peer) {
+  NCCL_CK(ncclGroupStart());
+  NCCL_CK(ncclRecv(buf, n, ncclBfloat16, peer, (ncclComm_t)c->comm, 0));
+  NCCL_CK(ncclGroupEnd());
+}
+void comms_sendrecv_bf16(Comms *c, void *sbuf, long sn, int speer,
+                         void *rbuf, long rn, int rpeer) {
+  NCCL_CK(ncclGroupStart());
+  NCCL_CK(ncclSend(sbuf, sn, ncclBfloat16, speer, (ncclComm_t)c->comm, 0));
+  NCCL_CK(ncclRecv(rbuf, rn, ncclBfloat16, rpeer, (ncclComm_t)c->comm, 0));
+  NCCL_CK(ncclGroupEnd());
+}
+void comms_sync_default(Comms *c) { (void)c; CK(cudaStreamSynchronize(0)); }

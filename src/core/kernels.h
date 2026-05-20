@@ -14,6 +14,7 @@ void mm_nt(const float *A, const float *B, float *C, int M, int N, int K);
 void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K);   // fp32 out
 void mm_nt_bf16o(const void *A, const void *B, void *C, int M, int N, int K);   // bf16 out
 void mm_tn_bf16(const void *A, const void *B, float *C, int M, int N, int K);   // A[K,M]^T@B[K,N], fp32 out
+void mm_tn_bf16_acc(const void *A, const void *B, float *C, int M, int N, int K);  // same, accumulates (beta=1)
 void mm_nn_bf16o(const void *A, const void *B, void *C, int M, int N, int K);   // A[M,K]@B[K,N], bf16 out
 // dtype casts (bf16 buffers passed as void*)
 void k_f2b(const float *in, void *out, long n);

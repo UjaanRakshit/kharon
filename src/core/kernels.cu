@@ -42,6 +42,13 @@ void mm_tn_bf16(const void *A, const void *B, float *C, int M, int N, int K) {
                          B, CUDA_R_16BF, N, A, CUDA_R_16BF, M, &b,
                          C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
+// Same, but accumulates into C (beta=1) — for grad accumulation across microbatches.
+void mm_tn_bf16_acc(const void *A, const void *B, float *C, int M, int N, int K) {
+  const float a = 1.f, b = 1.f;
+  CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, &a,
+                         B, CUDA_R_16BF, N, A, CUDA_R_16BF, M, &b,
+                         C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+}
 // C[M,N] = A[M,K] @ B[K,N], bf16 in/out — activation grads stay bf16.
 void mm_nn_bf16o(const void *A, const void *B, void *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;

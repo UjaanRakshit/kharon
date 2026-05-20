@@ -30,7 +30,7 @@ CORE_CU := kernels
 K_CU    := flash
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
-TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step test_tp1
+TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step test_tp1 test_pp1
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
 BENCH := bench_step bench_fused bench_flash bench_bf16
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
