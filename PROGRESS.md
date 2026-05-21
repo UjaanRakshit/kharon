@@ -10,7 +10,7 @@
 | 2 | FlashAttention + fused | done | ✓ FA fwd+bwd vs SDPA | FA 1.5 TFLOP/s, 0.82x cuBLAS (L40S); fusion 1.7x (4060) | beat-cuBLAS needs M3 BF16/TC |
 | 3 | BF16 + full step | done | ✓ (4060 + L40S) | learns 2.58->1.42; 115k tok/s (L40S, d512x8L); resume bit-exact | — |
 | 4 | TP=2 | done | ✓ loss curve matches single-GPU | comms 23.2% of step; 1.33x tok/s on 2x L40S | overlap is future (TP all-reduce on critical path) |
-| 5 | PP (1F1B) | not started | — | — | — |
+| 5 | PP (1F1B) | done | ✓ P=2 loss matches P=1 | bubble tracks (P-1)/(M+P-1); P=2 1.89x on 2 GPUs | interleaved 1F1B is stretch |
 | 6 | TP×PP | not started | — | — | — |
 | 7 | +ZeRO-1 DP (8 GPU) | not started | — | — | — |
 | 8 | Inference engine | not started | — | — | — |
@@ -42,7 +42,10 @@ States: not started / in progress / oracle-passing / benchmarked / done
   a proxy (~d=1024 x 12L ~200M params ~3.6GB) to prove the loop; full 1B waits for M4-M7.
 - FlashAttention vs official: __ (deferred to M3 — official FA is BF16/tensor-core)
 - Custom GEMM vs cuBLAS (shape __): __
-- Bubble fraction @ m=__ microbatches: __
+- Bubble fraction (1F1B, L40S): P=2 M=8/16/32/64 = 10.3/6.2/4.2/2.8% (theory 11.1/5.9/3.0/1.5);
+  P=4 M=16/32/64 = 16.0/10.4/6.4% (theory 15.8/8.6/4.5). Tracks (P-1)/(M+P-1); excess over
+  theory at large M is real PCIe send/recv cost. P=2 scales 1.89x on 2 GPUs (vs TP's 1.33x:
+  PP ships only stage-boundary activations, not per-layer all-reduce).
 - NCCL all-reduce bus bw (2x L40S, PCIe PXB, no NVLink): ~21 GB/s large msgs, ~2 GB/s @16KB
   (latency-bound small -> bandwidth-bound large). Headline interconnect ceiling for TP.
 - TP=2 (2x L40S PCIe, proxy d512 x 8L, bf16): loss curve matches single-GPU to ~3e-3 (bf16).
@@ -57,6 +60,12 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-30 (autonomous) — M5 DONE, validated on L40S (job 5348679). 1F1B pipeline:
+  stage-split (untied head, embeddings on stage 0), per-slot activation stash (~P in flight),
+  grad accumulation over microbatches, deadlock-free batched NCCL sendrecv (megatron-style:
+  pair fwd-send with bwd-recv). P=1 bit-matches single-GPU (test_pp1 local); P=2 loss curve
+  tracks P=1; bubble tracks (P-1)/(M+P-1), driven down by M; P=2 1.89x on 2 GPUs. Hit + fixed
+  a 1F1B comms deadlock (fwd-send before bwd-recv -> circular wait). m5-pp merged. Next: M6 (TPxPP).
 - 2026-05-29 (cont.5) — M4 DONE, validated on 2x L40S (job 5348274). Megatron TP=2:
   column-parallel qkv/fc, row-parallel proj/fcproj, 2 all-reduces/way (NCCL callback);
   embeddings/LN/head replicated. tp=1 bit-matches single-GPU (test_tp1); tp=2 loss curve
