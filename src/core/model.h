@@ -121,7 +121,7 @@ float  model_forward_tp(Model *m);
 void   model_backward_tp(Model *m);
 // pipeline-parallel stage (untied head on last stage). xout/dxin are device bf16
 // [batch,seq,d]: forward writes xout (non-last); backward writes dxin (non-first).
-Model *model_create_pp(Config stage_cfg, int first, int last, int nslots);
+Model *model_create_pp(Config stage_cfg, int first, int last, int nslots, int tp, int tp_rank);
 void   model_set_slot(Model *m, int slot);             // select activation stash slot
 void   model_init_weights_pp(Model *m, uint64_t seed, int layer_offset, int total_layers);
 float  model_forward_pp(Model *m, void *xout);          // returns loss on last stage

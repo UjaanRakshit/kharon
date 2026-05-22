@@ -5,8 +5,12 @@
 // bootstrapped with MPI. comm/stream are opaque (void*) to keep the C side clean.
 typedef struct {
   int rank, nranks, device;
-  void *comm;     // ncclComm_t
+  void *comm;     // ncclComm_t (global)
   void *stream;   // cudaStream_t for overlapped collectives
+  // 2D (TP x PP) grid: rank = pp_stage*tp_size + tp_rank. tp_comm = TP group within a
+  // stage (all-reduce); PP point-to-point uses the global comm, peer = rank +- tp_size.
+  int tp_size, tp_rank, pp_stage, pp_size;
+  void *tp_comm;
 } Comms;
 
 #ifdef __cplusplus
@@ -28,6 +32,9 @@ void comms_recv_bf16(Comms *c, void *buf, long n, int peer);
 void comms_sendrecv_bf16(Comms *c, void *sbuf, long sn, int speer,
                          void *rbuf, long rn, int rpeer);
 void comms_sync_default(Comms *c);   // sync the default stream (0)
+// 2D grid: split the global comm into TP groups (ranks sharing a pp_stage).
+void comms_init_grid(Comms *c, int tp_size);
+void comms_tp_allreduce_bf16(Comms *c, void *buf, long n);   // all-reduce within TP group
 
 #ifdef __cplusplus
 }
