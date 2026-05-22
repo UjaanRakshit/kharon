@@ -11,7 +11,7 @@
 | 3 | BF16 + full step | done | ✓ (4060 + L40S) | learns 2.58->1.42; 115k tok/s (L40S, d512x8L); resume bit-exact | — |
 | 4 | TP=2 | done | ✓ loss curve matches single-GPU | comms 23.2% of step; 1.33x tok/s on 2x L40S | overlap is future (TP all-reduce on critical path) |
 | 5 | PP (1F1B) | done | ✓ P=2 loss matches P=1 | bubble tracks (P-1)/(M+P-1); P=2 1.89x on 2 GPUs | interleaved 1F1B is stretch |
-| 6 | TP×PP | not started | — | — | — |
+| 6 | TP×PP | done | ✓ TP2xPP2 loss matches single-GPU | 4-GPU 268k tok/s (2.35x); TP all-reduce dominates | overlap is future (1 stream) |
 | 7 | +ZeRO-1 DP (8 GPU) | not started | — | — | — |
 | 8 | Inference engine | not started | — | — | — |
 | 9 | GRPO loop | not started | — | — | — |
@@ -54,12 +54,25 @@ States: not started / in progress / oracle-passing / benchmarked / done
   Overlap: ~0% in vanilla TP (all-reduce output consumed immediately); async comms hook
   exists for future sequence-parallel/overlap work. This is the PCIe-no-NVLink finding.
 - A100-NVLink vs L40S-PCIe TP=2: __
+- TP x PP (4x L40S, proxy d512 x 8L): TP2xPP2 loss matches single-GPU (bf16). Scaling
+  (tok/s): 1GPU 114k -> TP2 146k (1.28x) -> PP2 217k (1.90x) -> TP2xPP2 268k (2.35x).
+  Step breakdown (TP2xPP2): compute 172ms + TP all-reduce 52ms (21%) + PP bubble/comms 20ms
+  (8%). Finding: on PCIe (no NVLink) TP all-reduce dominates; PP scales far better. Two NCCL
+  comms (TP sub-comm via ncclCommSplit + PP p2p on global comm) coexist w/o deadlock.
 - Full 8-GPU mesh tokens/sec & MFU: __
 - vs Megatron-LM same config: __
 - GRPO reward curve delta: __
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-30 (autonomous) — M6 DONE, validated on 4x L40S (job 5348719). Composed TP x PP:
+  2D rank grid (rank = pp_stage*tp + tp_rank), TP sub-comm via ncclCommSplit + PP p2p on
+  global comm (peer = rank +- tp). Pipeline stages are TP-sharded (forward_pp/backward_pp
+  made tp-aware), double-sharded init (layer x tp). TP2xPP2 loss matches single-GPU (bf16);
+  4-GPU 2.35x; breakdown shows TP all-reduce (52ms) dominates, PP bubble (20ms) cheap. tp=1
+  and pp=1 degenerate cases bit-validated locally (test_tp1/test_pp1). m6-tp-pp merged.
+  NEXT: M7 (+ZeRO-1 DP -> full TP*PP*DP 8-GPU mesh). Note: per-rank mem high-water available
+  via arena instrumentation (not re-measured); comms on 1 stream (overlap = future opt).
 - 2026-05-30 (autonomous) — M5 DONE, validated on L40S (job 5348679). 1F1B pipeline:
   stage-split (untied head, embeddings on stage 0), per-slot activation stash (~P in flight),
   grad accumulation over microbatches, deadlock-free batched NCCL sendrecv (megatron-style:
