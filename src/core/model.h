@@ -21,10 +21,11 @@ typedef struct {
 
 typedef struct {
   Config cfg;
-  float *wte;          // [vocab,d]   (head is tied to this)
+  float *wte;          // [vocab,d]   (LM head tied to this in single-GPU/TP)
   float *wpe;          // [seq,d]
   LayerW *layer;       // [n_layer]
   float *lnf_w, *lnf_b;// [d]
+  float *head_w;       // [vocab,d] untied LM head (pipeline last stage only; else NULL)
   int n_param;         // total scalar params
 } Weights;
 
@@ -86,6 +87,16 @@ typedef struct {
   int tp, rank;
   void (*allreduce_bf16)(void *ctx, void *buf, long n);
   void *ar_ctx;
+  // pipeline parallelism: this stage owns this model's n_layer layers; first stage
+  // embeds, last stage has the untied head + loss. pp_xin/dxout are device bf16
+  // [batch,seq,d] buffers the scheduler fills (recv) / drains (send).
+  int pp_first, pp_last;
+  void *pp_xin, *pp_dxout;
+  // 1F1B keeps up to P microbatches in flight; each needs its own stashed acts.
+  // Slot 0 aliases a/a_bf; slots 1..nslots-1 get their own arenas. cur_slot selects.
+  int pp_nslots, cur_slot, pp_skip_loss;   // skip_loss: no host readback (clean timing)
+  Acts a_slot[8], a_bf_slot[8];
+  Arena a_slot_ar[8], ab_slot_ar[8];
 } Model;
 
 #ifdef __cplusplus
@@ -108,6 +119,14 @@ void   model_backward_bf16(Model *m);          // bf16 backward; weight grads ac
 void   model_init_weights_tp(Model *m, uint64_t seed);
 float  model_forward_tp(Model *m);
 void   model_backward_tp(Model *m);
+// pipeline-parallel stage (untied head on last stage). xout/dxin are device bf16
+// [batch,seq,d]: forward writes xout (non-last); backward writes dxin (non-first).
+Model *model_create_pp(Config stage_cfg, int first, int last, int nslots);
+void   model_set_slot(Model *m, int slot);             // select activation stash slot
+void   model_init_weights_pp(Model *m, uint64_t seed, int layer_offset, int total_layers);
+float  model_forward_pp(Model *m, void *xout);          // returns loss on last stage
+void   model_backward_pp(Model *m, void *dxin, float inv_microbatches);
+void   model_zero_grads(Model *m);                      // zero fp32 grad arena (once per step)
 
 #ifdef __cplusplus
 }

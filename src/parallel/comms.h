@@ -21,6 +21,13 @@ void comms_allreduce_bf16(Comms *c, void *buf, long n);
 // async variant on c->stream (for overlap); pair with comms_wait
 void comms_allreduce_bf16_async(Comms *c, void *buf, long n);
 void comms_wait(Comms *c);
+// point-to-point for pipeline parallelism (bf16), on the default stream.
+void comms_send_bf16(Comms *c, void *buf, long n, int peer);
+void comms_recv_bf16(Comms *c, void *buf, long n, int peer);
+// fused send+recv in one NCCL group (deadlock-free for adjacent-stage exchange)
+void comms_sendrecv_bf16(Comms *c, void *sbuf, long sn, int speer,
+                         void *rbuf, long rn, int rpeer);
+void comms_sync_default(Comms *c);   // sync the default stream (0)
 
 #ifdef __cplusplus
 }
