@@ -71,3 +71,16 @@ void comms_sendrecv_bf16(Comms *c, void *sbuf, long sn, int speer,
   NCCL_CK(ncclGroupEnd());
 }
 void comms_sync_default(Comms *c) { (void)c; CK(cudaStreamSynchronize(0)); }
+
+void comms_init_grid(Comms *c, int tp_size) {
+  c->tp_size = tp_size;
+  c->tp_rank = c->rank % tp_size;
+  c->pp_stage = c->rank / tp_size;
+  c->pp_size = c->nranks / tp_size;
+  ncclComm_t tpc;                                  // TP group = ranks sharing pp_stage
+  NCCL_CK(ncclCommSplit((ncclComm_t)c->comm, c->pp_stage, c->tp_rank, &tpc, NULL));
+  c->tp_comm = tpc;
+}
+void comms_tp_allreduce_bf16(Comms *c, void *buf, long n) {
+  NCCL_CK(ncclAllReduce(buf, buf, n, ncclBfloat16, ncclSum, (ncclComm_t)c->tp_comm, 0));
+}
