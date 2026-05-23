@@ -97,6 +97,15 @@ typedef struct {
   int pp_nslots, cur_slot, pp_skip_loss;   // skip_loss: no host readback (clean timing)
   Acts a_slot[8], a_bf_slot[8];
   Arena a_slot_ar[8], ab_slot_ar[8];
+  // ZeRO-1 data parallel: each DP rank owns params [zero_off, zero_off+zero_n). Adam
+  // moments are allocated only for the shard. Grads are reduce-scattered into grad_shard,
+  // AdamW updates this rank's master slice, then params are all-gathered back to full.
+  int dp_size, dp_rank;
+  long zero_off, zero_n, zero_npad;        // shard offset/length (floats) + padded total
+  float *grad_shard;
+  void (*dp_reduce_scatter)(void *ctx, const float *send, float *recv, long recvcount);
+  void (*dp_all_gather)(void *ctx, const float *send, float *recv, long sendcount);
+  void *dp_ctx;
 } Model;
 
 #ifdef __cplusplus
@@ -127,6 +136,10 @@ void   model_init_weights_pp(Model *m, uint64_t seed, int layer_offset, int tota
 float  model_forward_pp(Model *m, void *xout);          // returns loss on last stage
 void   model_backward_pp(Model *m, void *dxin, float inv_microbatches);
 void   model_zero_grads(Model *m);                      // zero fp32 grad arena (once per step)
+// ZeRO-1: shard Adam moments + master-weight updates across dp_size DP replicas.
+// Call after model_create_pp; reallocates moment buffers to the 1/DP shard.
+void   model_enable_zero(Model *m, int dp_size, int dp_rank);
+void   model_adamw_step_zero(Model *m, float lr, float b1, float b2, float eps, float wd);
 
 #ifdef __cplusplus
 }

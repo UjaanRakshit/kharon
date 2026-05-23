@@ -26,16 +26,18 @@ void ckpt_save(const Model *m, uint64_t rng, const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) DIE("ckpt_save: cannot open %s", path);
   size_t pb = m->w_arena.off;
+  size_t ob = m->dp_size > 1 ? (size_t)m->zero_n * 4 : pb;   // ZeRO-1: per-rank moment shard
   Config c = m->cfg;
   wr(f, CKPT_MAGIC, 4);
   wr(f, &c, sizeof(c));
   wr(f, &m->step, sizeof(int));
   wr(f, &rng, sizeof(uint64_t));
   wr(f, &pb, sizeof(size_t));
+  wr(f, &ob, sizeof(size_t));
   void *stage = malloc(pb);
   dump_dev(f, m->w_arena.base, pb, stage);
-  dump_dev(f, m->opt_m, pb, stage);
-  dump_dev(f, m->opt_v, pb, stage);
+  dump_dev(f, m->opt_m, ob, stage);
+  dump_dev(f, m->opt_v, ob, stage);
   free(stage);
   fclose(f);
 }
@@ -45,7 +47,7 @@ void ckpt_load(Model *m, uint64_t *rng, const char *path) {
   if (!f) DIE("ckpt_load: cannot open %s", path);
   char magic[4];
   Config c;
-  size_t pb;
+  size_t pb, ob;
   rd(f, magic, 4);
   if (memcmp(magic, CKPT_MAGIC, 4) != 0) DIE("ckpt_load: bad magic");
   rd(f, &c, sizeof(c));
@@ -53,11 +55,14 @@ void ckpt_load(Model *m, uint64_t *rng, const char *path) {
   rd(f, &m->step, sizeof(int));
   rd(f, rng, sizeof(uint64_t));
   rd(f, &pb, sizeof(size_t));
+  rd(f, &ob, sizeof(size_t));
   if (pb != m->w_arena.off) DIE("ckpt_load: param size mismatch");
+  size_t want_ob = m->dp_size > 1 ? (size_t)m->zero_n * 4 : pb;
+  if (ob != want_ob) DIE("ckpt_load: moment shard size mismatch");
   void *stage = malloc(pb);
   load_dev(f, m->w_arena.base, pb, stage);
-  load_dev(f, m->opt_m, pb, stage);
-  load_dev(f, m->opt_v, pb, stage);
+  load_dev(f, m->opt_m, ob, stage);
+  load_dev(f, m->opt_v, ob, stage);
   free(stage);
   fclose(f);
 }
