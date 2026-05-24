@@ -12,7 +12,7 @@
 | 4 | TP=2 | done | ✓ loss curve matches single-GPU | comms 23.2% of step; 1.33x tok/s on 2x L40S | overlap is future (TP all-reduce on critical path) |
 | 5 | PP (1F1B) | done | ✓ P=2 loss matches P=1 | bubble tracks (P-1)/(M+P-1); P=2 1.89x on 2 GPUs | interleaved 1F1B is stretch |
 | 6 | TP×PP | done | ✓ TP2xPP2 loss matches single-GPU | 4-GPU 268k tok/s (2.35x); TP all-reduce dominates | overlap is future (1 stream) |
-| 7 | +ZeRO-1 DP (8 GPU) | not started | — | — | — |
+| 7 | +ZeRO-1 DP (8 GPU) | done | ✓ ZeRO update bit-identical; mesh loss tracks baseline; resume bit-exact | 1.2B on 8 GPU: 30.5k tok/s, MFU 15.3%, 19.1GB/rank | DP all-gather is fp32 (future: bf16 gather) |
 | 8 | Inference engine | not started | — | — | — |
 | 9 | GRPO loop | not started | — | — | — |
 | 10 | Benchmark + writeup | not started | — | — | — |
@@ -59,12 +59,39 @@ States: not started / in progress / oracle-passing / benchmarked / done
   Step breakdown (TP2xPP2): compute 172ms + TP all-reduce 52ms (21%) + PP bubble/comms 20ms
   (8%). Finding: on PCIe (no NVLink) TP all-reduce dominates; PP scales far better. Two NCCL
   comms (TP sub-comm via ncclCommSplit + PP p2p on global comm) coexist w/o deadlock.
-- Full 8-GPU mesh tokens/sec & MFU: __
+- Full 8-GPU mesh (TP2 x PP2 x DP2, ZeRO-1), full ~1.2B model (d2048 x 24L, seq512):
+  1072 ms/step, 30.5k tok/s, MFU 15.3% (L40S bf16 dense peak 181 TFLOP/s). 19.1 GB/rank
+  used (of 47.7) -> full 1B fits with room. Step breakdown: compute 729 + TP all-reduce 130
+  (12%) + PP bubble/comms 111 (10%) + DP opt-comm 102 ms (9.5%). All three axes cost ~10%
+  each; the honest map is "PCIe-comms-bound, ~32% in collectives, no axis free". Bubble
+  11.5% vs theory 11.1% (M=8,P=2). On the tiny proxy (d512 x 8L) the mesh is far more
+  comms-bound: 531k tok/s but MFU only 5.6%, TP all-reduce alone 21% (compute too small to
+  hide PCIe) — small models do not amortize the interconnect.
+- ZeRO-1 (shard Adam m,v across DP): opt-state/rank 1215 MB at DP=2 vs 2430 MB replicated
+  (exactly 1/DP). fp32 master kept replicated + reconstructed by all-gather each step (the
+  DP opt-comm cost above); sharding the master too is the remaining ZeRO-1 increment.
+  Update math bit-identical to unsharded AdamW (test_zero, incl. uneven padding).
+- DP grad-averaging equivalence (2x L40S): pure DP2 over M=16/replica matches single-GPU
+  over M=32 to bf16 tol (loss 2.371 vs 2.359 at step 200) — reduce-scatter(avg) is exact.
+- Checkpoint/resume bit-exact on the sharded 8-GPU mesh: continuous 0->40 == split (save@20,
+  resume->40), loss 3.2218 identical to 4 d.p. (per-rank ckpt stores the moment shard).
 - vs Megatron-LM same config: __
 - GRPO reward curve delta: __
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-30 (autonomous) — M7 DONE, validated on 8x L40S (job 5348750, 10 min walltime).
+  ZeRO-1 data parallel + full TP2 x PP2 x DP2 mesh. comms_init_grid3 adds a DP sub-comm
+  (ncclCommSplit); rank = dp*(PP*TP)+pp*TP+tp keeps TP pairs adjacent (closest PCIe), then
+  PP, then DP. ZeRO-1: reduce-scatter(avg) fp32 grads -> sharded AdamW on the master slice ->
+  all-gather params; Adam moments sharded to 1/DP (1215 MB vs 2430 at DP=2). Trained the full
+  ~1.2B model (d2048 x 24L) on 8 GPU: 30.5k tok/s, MFU 15.3%, 19.1 GB/rank (fits 48). 3-axis
+  breakdown each ~10% (TP 130 / PP 111 / DP 102 ms over 729 compute) -> PCIe-comms-bound, no
+  free axis. Oracles: ZeRO update bit-identical to unsharded (test_zero); DP2-over-M16 ==
+  1GPU-over-M32 (bf16 tol); resume bit-exact across the sharded mesh (3.2218 == 3.2218).
+  m7-3d merged. Finding: ZeRO all-gather of the fp32 master each step is a real PCIe cost;
+  sharding the master + bf16 gather is the next increment. NEXT: M8 (inference engine:
+  paged KV, continuous batching).
 - 2026-05-30 (autonomous) — M6 DONE, validated on 4x L40S (job 5348719). Composed TP x PP:
   2D rank grid (rank = pp_stage*tp + tp_rank), TP sub-comm via ncclCommSplit + PP p2p on
   global comm (peer = rank +- tp). Pipeline stages are TP-sharded (forward_pp/backward_pp

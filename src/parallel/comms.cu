@@ -36,6 +36,8 @@ void comms_init(Comms *c) {
 }
 
 void comms_finalize(Comms *c) {
+  if (c->dp_comm) ncclCommDestroy((ncclComm_t)c->dp_comm);
+  if (c->tp_comm) ncclCommDestroy((ncclComm_t)c->tp_comm);
   ncclCommDestroy((ncclComm_t)c->comm);
   cudaStreamDestroy((cudaStream_t)c->stream);
   MPI_Finalize();
@@ -72,15 +74,34 @@ void comms_sendrecv_bf16(Comms *c, void *sbuf, long sn, int speer,
 }
 void comms_sync_default(Comms *c) { (void)c; CK(cudaStreamSynchronize(0)); }
 
-void comms_init_grid(Comms *c, int tp_size) {
+void comms_init_grid(Comms *c, int tp_size) { comms_init_grid3(c, tp_size, 1); }
+
+void comms_init_grid3(Comms *c, int tp_size, int dp_size) {
+  int pp_size = c->nranks / (tp_size * dp_size);
   c->tp_size = tp_size;
+  c->dp_size = dp_size;
+  c->pp_size = pp_size;
   c->tp_rank = c->rank % tp_size;
-  c->pp_stage = c->rank / tp_size;
-  c->pp_size = c->nranks / tp_size;
-  ncclComm_t tpc;                                  // TP group = ranks sharing pp_stage
-  NCCL_CK(ncclCommSplit((ncclComm_t)c->comm, c->pp_stage, c->tp_rank, &tpc, NULL));
+  c->pp_stage = (c->rank / tp_size) % pp_size;
+  c->dp_rank = c->rank / (tp_size * pp_size);
+  int tppos = c->pp_stage * tp_size + c->tp_rank;   // position within a (TP x PP) block
+  ncclComm_t tpc;                                   // TP group = same (dp,pp), vary tp_rank
+  NCCL_CK(ncclCommSplit((ncclComm_t)c->comm, c->dp_rank * pp_size + c->pp_stage, c->tp_rank,
+                        &tpc, NULL));
   c->tp_comm = tpc;
+  ncclComm_t dpc = NULL;                            // DP group = same (pp,tp), vary dp_rank
+  if (dp_size > 1)
+    NCCL_CK(ncclCommSplit((ncclComm_t)c->comm, tppos, c->dp_rank, &dpc, NULL));
+  c->dp_comm = dpc;
 }
 void comms_tp_allreduce_bf16(Comms *c, void *buf, long n) {
   NCCL_CK(ncclAllReduce(buf, buf, n, ncclBfloat16, ncclSum, (ncclComm_t)c->tp_comm, 0));
+}
+// reduce-scatter with averaging: each rank receives the DP-mean of its 1/DP grad shard.
+void comms_dp_reducescatter_f32(Comms *c, const float *send, float *recv, long recvcount) {
+  NCCL_CK(ncclReduceScatter(send, recv, recvcount, ncclFloat, ncclAvg,
+                            (ncclComm_t)c->dp_comm, 0));
+}
+void comms_dp_allgather_f32(Comms *c, const float *send, float *recv, long sendcount) {
+  NCCL_CK(ncclAllGather(send, recv, sendcount, ncclFloat, (ncclComm_t)c->dp_comm, 0));
 }
