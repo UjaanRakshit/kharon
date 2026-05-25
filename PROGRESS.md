@@ -13,7 +13,7 @@
 | 5 | PP (1F1B) | done | ✓ P=2 loss matches P=1 | bubble tracks (P-1)/(M+P-1); P=2 1.89x on 2 GPUs | interleaved 1F1B is stretch |
 | 6 | TP×PP | done | ✓ TP2xPP2 loss matches single-GPU | 4-GPU 268k tok/s (2.35x); TP all-reduce dominates | overlap is future (1 stream) |
 | 7 | +ZeRO-1 DP (8 GPU) | done | ✓ ZeRO update bit-identical; mesh loss tracks baseline; resume bit-exact | 1.2B on 8 GPU: 30.5k tok/s, MFU 15.3%, 19.1GB/rank | DP all-gather is fp32 (future: bf16 gather) |
-| 8 | Inference engine | not started | — | — | — |
+| 8 | Inference engine | done | ✓ paged decode == PyTorch greedy (token-exact); paged == contiguous | 1.2B G=32 1606 tok/s; paged KV 2x; prefix saves 1.5GB @G=32 | paged-attn is 1 block/(tok,head) (future: tiled) |
 | 9 | GRPO loop | not started | — | — | — |
 | 10 | Benchmark + writeup | not started | — | — | — |
 
@@ -75,11 +75,35 @@ States: not started / in progress / oracle-passing / benchmarked / done
   over M=32 to bf16 tol (loss 2.371 vs 2.359 at step 200) — reduce-scatter(avg) is exact.
 - Checkpoint/resume bit-exact on the sharded 8-GPU mesh: continuous 0->40 == split (save@20,
   resume->40), loss 3.2218 identical to 4 d.p. (per-rank ckpt stores the moment shard).
+- M8 inference engine (paged-KV + continuous batching). Oracle (L40S + 4060): fp32 paged
+  decode == PyTorch greedy token-for-token across staggered batch entry/exit; paged ==
+  contiguous (block_size>=len); bf16 greedy matches fp32 here too. Rollout throughput
+  (L40S, bf16, prompt128+new256): 350M (d1024 x 24L) G=1/8/16/32 = 166/810/1619/2693 tok/s;
+  1.2B (d2048 x 24L) = 82/531/941/1606 tok/s. Continuous batching scales ~16x from G=1->32
+  (decode is memory-bw/latency bound; batching amortizes weight reads). Paged KV vs naive
+  contiguous (reserve full seq): 2.0-2.67x less memory (only used blocks allocated). Prefix
+  sharing (one prompt, G samples = the GRPO pattern): blocks stored once, saving (G-1)*full
+  prefix blocks — 1.56 GB at G=32 on the 1.2B model (256-tok prompt). Only FULL prefix
+  blocks shared read-only; partial last block is copy-on-write per sequence (vLLM-style).
+  Engine reuses the bf16 forward kernels; q/k/v read straight from the fused qkv buffer
+  (no head transpose). paged-attn is one block per (token,head) — correct but not tiled;
+  a blocked/warp-efficient kernel is the obvious throughput lever (noted, not done).
 - vs Megatron-LM same config: __
 - GRPO reward curve delta: __
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-30 (autonomous) — M8 DONE, validated on L40S (job 5348786) + 4060. Real paged-KV
+  inference engine: fixed-size block pool + per-seq block tables (vLLM-style), decode forward
+  reusing the bf16 kernels (q/k/v read straight from fused qkv, no transpose), continuous-batch
+  scheduler (staggered entry/exit, blocks freed on EOS), greedy sampling, prefix sharing for
+  the shared-prompt (GRPO) case with copy-on-write of the partial block. New kernels
+  (embed_pos, append_kv, paged_attn, gather_rows) templated fp32/bf16. Oracle: fp32 paged
+  decode == PyTorch greedy token-exact (4 prompts, staggered), paged == contiguous, prefix
+  group matches. Numbers: 1.2B G=32 1606 tok/s (16x scaling G1->32); paged KV 2-2.67x vs
+  naive; prefix sharing saves 1.5 GB at G=32. test_infer green locally + cluster. m8-infer
+  merged. Finding: paged-attn (1 block/(tok,head)) is the throughput lever for later; decode
+  is batching-bound, prefix sharing is a big win for group rollouts. NEXT: M9 (GRPO loop).
 - 2026-05-30 (autonomous) — M7 DONE, validated on 8x L40S (job 5348750, 10 min walltime).
   ZeRO-1 data parallel + full TP2 x PP2 x DP2 mesh. comms_init_grid3 adds a DP sub-comm
   (ncclCommSplit); rank = dp*(PP*TP)+pp*TP+tp keeps TP pairs adjacent (closest PCIe), then

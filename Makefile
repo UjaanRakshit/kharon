@@ -25,14 +25,14 @@ ifdef CCBIN
   NVCCFLAGS += -ccbin "$(CCBIN)"
 endif
 
-CORE_C  := arena refio gpt adamw ckpt data
+CORE_C  := arena refio gpt adamw ckpt data infer
 CORE_CU := kernels
-K_CU    := flash
+K_CU    := flash paged
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
-TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step test_tp1 test_pp1 test_zero
+TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step test_tp1 test_pp1 test_zero test_infer
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
-BENCH := bench_step bench_fused bench_flash bench_bf16
+BENCH := bench_step bench_fused bench_flash bench_bf16 bench_infer
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 
 .PHONY: all tests bench train clean
