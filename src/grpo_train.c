@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
   model_init_weights(ref, 1337);
   model_sync_bf16(ref);
 
-  Engine *e = infer_create(m, 8, B * 4 + 64, B * T + 64, B + 1, 1);
+  Engine *e = infer_create(m, 2, B * T + 64, B * T + 64, B + 1, 1);  // bs=2: prompt = 2 shared blocks
   Rng task; rng_seed(&task, 20260530);
 
   int *idx = (int *)malloc((long)B * T * 4), *tgt = (int *)malloc((long)B * T * 4);
@@ -108,6 +108,7 @@ int main(int argc, char **argv) {
   for (int step = 1; step <= steps; step++) {
     model_sync_bf16(m);                          // engine serves the current policy
     infer_set_sampling(e, temp, 0x1234ull * step + 1);
+    double roll_ms = 0, roll_tok = 0, roll_saved = 0;
     // rollout: G samples per prompt (prefix-shared), fill the [B,T] training batch
     for (int pi = 0; pi < NP; pi++) {
       int a = rng_u32(&task) % 10, b = rng_u32(&task) % 10;
@@ -116,6 +117,7 @@ int main(int argc, char **argv) {
       for (int g = 0; g < G; g++) out[g] = outbuf[g];
       InferStats st; float ms;
       infer_generate_group(e, prompt, PLEN, G, NNEW, out, outlen, &st, &ms);
+      roll_ms += ms; roll_tok += st.tokens_decoded; roll_saved += st.prefix_blocks_saved;
       for (int g = 0; g < G; g++) {
         int row = pi * G + g;
         rew[row] = reward(outbuf[g] + PLEN, ans[pi], a + b);
@@ -155,7 +157,8 @@ int main(int argc, char **argv) {
     if (step % logevery == 0) {
       double mr = 0; for (int i = 0; i < B; i++) mr += rew[i]; mr /= B;
       float acc = eval_accuracy(e, 0);
-      printf("step %4d  mean-reward %.3f  greedy-acc %.3f\n", step, mr, acc);
+      printf("step %4d  mean-reward %.3f  greedy-acc %.3f  | rollout %.0f tok/s, prefix saved %.0f blk/step\n",
+             step, mr, acc, roll_tok * 1000.0 / roll_ms, roll_saved / NP);
     }
   }
 
