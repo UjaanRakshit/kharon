@@ -17,5 +17,5 @@ echo "=== build ==="; make tests train 2>&1 | tail -2
 echo "=== oracle: GRPO advantages + policy-gradient backward (== CE backward) ==="
 ./build/test_grpo.exe tests/m1_ref.bin
 
-echo "=== GRPO reward curve: 2-digit addition, group sampling + prefix-shared rollouts ==="
-./build/grpo_train.exe --layers 6 --d 512 --heads 8 --G 16 --prompts 32 --steps 1500 --log 100 --lr 8e-4 --temp 0.9 --beta 0.008
+echo "=== SFT warm-start -> GRPO: single-digit addition, group sampling + prefix-shared rollouts ==="
+./build/grpo_train.exe --layers 6 --d 512 --heads 8 --G 16 --prompts 32 --sft 200 --steps 400 --log 50 --lr 1e-3 --rllr 1e-4 --temp 0.7 --beta 0.02
