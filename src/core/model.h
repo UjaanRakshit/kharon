@@ -124,6 +124,9 @@ void   model_adamw_step(Model *m, float lr, float b1, float b2, float eps, float
 void   model_sync_bf16(Model *m);              // cast fp32 master weights -> bf16 compute copy
 float  model_forward_bf16(Model *m);           // bf16 mixed-precision forward (returns loss)
 void   model_backward_bf16(Model *m);          // bf16 backward; weight grads accumulate fp32
+// GRPO policy-gradient backward: dlogits = coef[row]*(probs-onehot(tgt)); coef (device
+// [B*T]) carries advantage - KL term, masked to completion tokens, with 1/N folded in.
+void   model_grpo_backward(Model *m, const float *d_coef);
 // tensor-parallel (tp>1) bf16 path; all-reduce via m->allreduce_bf16 callback
 void   model_init_weights_tp(Model *m, uint64_t seed);
 float  model_forward_tp(Model *m);

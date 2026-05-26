@@ -6,13 +6,15 @@
 #include <math.h>
 
 static cublasHandle_t g_h;
+static int g_h_refs;          // refcounted: multiple models/engine share one handle
 
 void gemm_init(void) {
+  if (g_h_refs++ > 0) return;
   CUBLAS_CK(cublasCreate(&g_h));
   // deterministic, no tensor-core path that reorders accumulation
   CUBLAS_CK(cublasSetMathMode(g_h, CUBLAS_PEDANTIC_MATH));
 }
-void gemm_destroy(void) { cublasDestroy(g_h); }
+void gemm_destroy(void) { if (--g_h_refs == 0) cublasDestroy(g_h); }
 
 // Row-major GEMM via column-major cuBLAS. A row-major matrix handed to cuBLAS is
 // read as its transpose; the calls below are derived from that identity.
@@ -348,6 +350,31 @@ void k_cross_entropy_bwd_bf(const float *probs, const int *tgt, void *dlogits,
                             int rows, int vocab, float invN) {
   long n = (long)rows * vocab;
   ce_bwd_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>(probs, tgt, (__nv_bfloat16 *)dlogits, vocab, invN);
+}
+
+// GRPO policy-gradient dlogits: per-row coefficient (= advantage minus KL term, with
+// 1/N folded in) times the cross-entropy gradient. coef[row] already carries the mask
+// (0 for prompt/pad tokens). dlogits[row,j] = coef[row] * (probs[row,j] - onehot[tgt]).
+template <class ST>
+__global__ void grpo_dlogits_k(const float *probs, const int *tgt, const float *coef,
+                               ST *dlogits, int vocab) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  int row = i / vocab, col = i % vocab;
+  dlogits[i] = fromF<ST>(coef[row] * (probs[i] - (col == tgt[row] ? 1.f : 0.f)));
+}
+void k_grpo_dlogits_bf(const float *probs, const int *tgt, const float *coef, void *dlogits,
+                       int rows, int vocab) {
+  long n = (long)rows * vocab;
+  grpo_dlogits_k<__nv_bfloat16><<<ndiv(n, TPB), TPB>>>(probs, tgt, coef, (__nv_bfloat16 *)dlogits, vocab);
+}
+
+// Gather the probability the model assigned to the action taken at each row.
+__global__ void gather_prob_k(const float *probs, const int *tgt, float *out, int vocab, long rows) {
+  long r = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (r < rows) out[r] = probs[r * (long)vocab + tgt[r]];
+}
+void k_gather_prob(const float *probs, const int *tgt, float *out, int rows, int vocab) {
+  gather_prob_k<<<ndiv(rows, TPB), TPB>>>(probs, tgt, out, vocab, rows);
 }
 
 template <class ST>

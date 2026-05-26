@@ -80,6 +80,11 @@ void k_cross_entropy_fwd(const float *logits, const int *tgt, float *probs,
 // --- backward kernels ---
 void k_cross_entropy_bwd(const float *probs, const int *tgt, float *dlogits,
                          int rows, int vocab, float invN);
+// GRPO: dlogits[row] = coef[row] * (probs[row] - onehot[tgt[row]]); coef folds in
+// advantage, KL term, mask and 1/N. k_gather_prob pulls p(action) per row for the KL.
+void k_grpo_dlogits_bf(const float *probs, const int *tgt, const float *coef, void *dlogits,
+                       int rows, int vocab);
+void k_gather_prob(const float *probs, const int *tgt, float *out, int rows, int vocab);
 void k_layernorm_bwd(const float *dy, const float *x, const float *w,
                      const float *mean, const float *rstd,
                      float *dx, float *dw, float *db, int rows, int d);
