@@ -88,11 +88,38 @@ States: not started / in progress / oracle-passing / benchmarked / done
   Engine reuses the bf16 forward kernels; q/k/v read straight from the fused qkv buffer
   (no head transpose). paged-attn is one block per (token,head) — correct but not tiled;
   a blocked/warp-efficient kernel is the obvious throughput lever (noted, not done).
+- M9 GRPO (no critic) on byte-level single-digit addition. Oracles: group-relative
+  advantages == direct (r-mean)/std; the policy-gradient backward is bit-identical to the
+  PyTorch-validated CE backward at coef=1/N (since dlogits = coef*(probs-onehot)) and
+  scales linearly in coef. Key finding: GRPO from a *random* init collapses to the
+  marginal-mode answer — once collapsed, every group has zero reward-variance, so the
+  advantage is 0 and there is no escape (verified: greedy stuck at the modal token). Real
+  GRPO sharpens a pretrained policy, so the loop is SFT warm-start (CE, 0->96%) -> snapshot
+  as frozen KL reference -> GRPO at lr/10. GRPO then refines SFT's ~87-96% -> 100% task
+  accuracy (mean reward 1.05->1.10, stable), sample completions all correct (no reward
+  hacking). RL lr must be << SFT lr: at the SFT lr the policy-gradient noise destroys the
+  SFT solution (96%->29%). Rollouts via the M8 engine, prefix-shared per group (30
+  blocks/step saved at G=16, bs=2), ~51k tok/s on L40S. Handoff: model_sync_bf16 after each
+  update so the engine serves the current policy. Shaped/closeness rewards were removed —
+  they create a hackable constant-output optimum the sample logging caught. (Cluster job
+  5348827: oracle PASS, SFT 0->87%, GRPO ->100%.)
 - vs Megatron-LM same config: __
 - GRPO reward curve delta: __
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-30 (autonomous) — M9 DONE, validated on L40S (job 5348827) + 4060. GRPO (no critic)
+  on byte-level single-digit addition. Reused the M7 trainer (policy-gradient via a new
+  model_grpo_backward: dlogits = coef*(probs-onehot), coef = mask*(advantage - beta*KL)/N;
+  factored the bf16 backward into a shared tail) and the M8 engine for prefix-shared group
+  rollouts (added temperature sampling). Oracles: advantages vs formula; GRPO bwd bit-
+  identical to the PyTorch-validated CE bwd + linearity (test_grpo). Hit + diagnosed the
+  cold-start collapse (random policy -> marginal mode -> zero-variance groups -> dead
+  gradient) and reward hacking (closeness reward -> constant output, caught by sample
+  logging). Fix = SFT warm-start (0->96%) then GRPO at lr/10 refines 96->100%, KL to the
+  SFT snapshot. Also fixed a real bug: the global cublas handle wasn't refcounted, so a
+  process with >1 model + engine double-freed it (heap corruption) — now refcounted.
+  m9-grpo merged. NEXT: M10 (benchmark suite + writeup — the honest perf map).
 - 2026-05-30 (autonomous) — M8 DONE, validated on L40S (job 5348786) + 4060. Real paged-KV
   inference engine: fixed-size block pool + per-seq block tables (vLLM-style), decode forward
   reusing the bf16 kernels (q/k/v read straight from fused qkv, no transpose), continuous-batch
