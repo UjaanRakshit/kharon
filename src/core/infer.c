@@ -1,6 +1,7 @@
 #include "infer.h"
 #include "kernels.h"
 #include "paged.h"
+#include "rng.h"
 #include "kharon.h"
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,15 @@ struct Engine {
   // block allocator
   int *freelist, n_free;
   long blocks_peak, blocks_inuse;
+  // sampling: temp<=0 -> greedy (oracle); temp>0 -> categorical from softmax(logits/temp)
+  float temp;
+  Rng rng;
 };
+
+void infer_set_sampling(Engine *e, float temperature, unsigned long long seed) {
+  e->temp = temperature;
+  rng_seed(&e->rng, seed);
+}
 
 static void *dalloc(long bytes) { void *p; CK(cudaMalloc(&p, bytes)); return p; }
 
@@ -191,6 +200,18 @@ static int argmax_row(const float *r, int V) {
   return best;
 }
 
+// Temperature sampling from a logit row (softmax(logits/temp), categorical draw).
+static int sample_row(Engine *e, const float *r, int V) {
+  if (e->temp <= 0.f) return argmax_row(r, V);
+  float mx = r[0];
+  for (int j = 1; j < V; j++) if (r[j] > mx) mx = r[j];
+  double s = 0;
+  for (int j = 0; j < V; j++) s += exp((r[j] - mx) / e->temp);
+  double u = (rng_u32(&e->rng) / 4294967296.0) * s, c = 0;
+  for (int j = 0; j < V; j++) { c += exp((r[j] - mx) / e->temp); if (u <= c) return j; }
+  return V - 1;
+}
+
 // Per-sequence runtime state for the scheduler.
 typedef struct {
   int *tok, len, cached, target, plen, done, active, slot;
@@ -232,7 +253,7 @@ static void batch_step(Engine *e, Seq **act, int na) {
   for (int i = 0; i < na; i++) {
     Seq *s = act[i];
     s->cached = s->len;                              // positions [.., len-1] now cached
-    int nxt = argmax_row(e->h_logits + (long)i * V, V);
+    int nxt = sample_row(e, e->h_logits + (long)i * V, V);
     s->tok[s->len] = nxt; s->len++;
     if (s->len - 1 < mlb * e->bs) ensure_blocks(e, s, s->len - 1);
     if (s->len >= s->target) s->done = 1;
@@ -333,7 +354,7 @@ long infer_generate_group(Engine *e, int *prompt, int plen, int G, int n_new,
       s->btab[s->nblk++] = pv;
     }
     s->out = out[i];
-    int nxt = argmax_row(e->h_logits, e->V);            // first token from prefill logits
+    int nxt = sample_row(e, e->h_logits, e->V);         // first token from prefill logits
     s->tok[s->len] = nxt; s->len++;
     if (s->len - 1 < e->max_lb * e->bs) ensure_blocks(e, s, s->len - 1);
   }

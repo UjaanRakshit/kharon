@@ -24,6 +24,9 @@ extern "C" {
 Engine *infer_create(Model *m, int block_size, int n_blocks, int max_tokens,
                      int max_seqs, int use_bf16);
 void    infer_free(Engine *e);
+// Sampling mode: temperature<=0 is greedy (deterministic, for the oracle); temperature>0
+// draws categorically from softmax(logits/temperature) using a seeded RNG (for rollouts).
+void    infer_set_sampling(Engine *e, float temperature, unsigned long long seed);
 
 // Independent greedy generations via continuous batching (at most max_active in flight).
 // out[i] (caller-allocated, >= plen[i]+n_new[i]) receives prompt+continuation; outlen[i]

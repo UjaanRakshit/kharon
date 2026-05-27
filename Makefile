@@ -25,12 +25,12 @@ ifdef CCBIN
   NVCCFLAGS += -ccbin "$(CCBIN)"
 endif
 
-CORE_C  := arena refio gpt adamw ckpt data infer
+CORE_C  := arena refio gpt adamw ckpt data infer grpo
 CORE_CU := kernels
 K_CU    := flash paged
 OBJ := $(addprefix $(BUILD)/,$(addsuffix .o,$(CORE_C) $(CORE_CU) $(K_CU)))
 
-TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step test_tp1 test_pp1 test_zero test_infer
+TESTS := test_loadref test_forward test_backward test_step test_resume test_flash test_bf16fwd test_bf16step test_tp1 test_pp1 test_zero test_infer test_grpo
 BINS  := $(addprefix $(BUILD)/,$(addsuffix .exe,$(TESTS)))
 BENCH := bench_step bench_fused bench_flash bench_bf16 bench_infer
 BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
@@ -39,9 +39,12 @@ BENCHBINS := $(addprefix $(BUILD)/,$(addsuffix .exe,$(BENCH)))
 all: tests bench train
 tests: $(BINS)
 bench: $(BENCHBINS)
-train: $(BUILD)/train.exe
+train: $(BUILD)/train.exe $(BUILD)/grpo_train.exe
 
 $(BUILD)/train.exe: src/train.c $(OBJ) $(HDRS) | $(BUILD)
+	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
+
+$(BUILD)/grpo_train.exe: src/grpo_train.c $(OBJ) $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
 
 # Multi-GPU (NCCL + MPI) targets — cluster only. mpicxx supplies MPI; NCCL via $NCCL_ROOT.

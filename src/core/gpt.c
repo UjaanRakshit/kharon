@@ -488,9 +488,9 @@ static void dcopyb(void *dst, const void *src, long n) {
   CK(cudaMemcpy(dst, src, n * 2, cudaMemcpyDeviceToDevice));   // bf16 = 2 bytes
 }
 
-// BF16 backward: activation grads in bf16 (s_bf), weight grads accumulated fp32 (g)
-// for the AdamW master. Mirrors model_backward op-for-op.
-void model_backward_bf16(Model *m) {
+// BF16 backward from a populated dlogits (s_bf.logits): the head + transformer-stack
+// gradient pass, shared by the cross-entropy trainer and the GRPO policy-gradient step.
+static void backward_bf16_tail(Model *m) {
   Config c = m->cfg;
   int d = c.d_model, H = c.n_head, hd = d / H, V = c.vocab, ff = 4 * d, T = c.seq, B = c.batch;
   long R = (long)B * T, RD = R * d;
@@ -499,9 +499,6 @@ void model_backward_bf16(Model *m) {
   Acts *a = &m->a_bf, *af = &m->a;
   Bwd *s = &m->s_bf;
 
-  CK(cudaMemset(m->g_arena.base, 0, m->g_arena.off));
-
-  k_cross_entropy_bwd_bf(af->probs, m->d_tgt, s->logits, R, V, 1.f / R);
   mm_nn_bf16o(s->logits, w->wte, s->lnf, R, d, V);
   mm_tn_bf16(s->logits, a->lnf, g->wte, V, d, R);
 
@@ -543,6 +540,27 @@ void model_backward_bf16(Model *m) {
   }
   k_embed_bwd_wte_bf(s->dx, m->d_idx, g->wte, R, V, d);
   k_embed_bwd_wpe_bf(s->dx, g->wpe, B, T, d);
+}
+
+// BF16 backward: activation grads in bf16 (s_bf), weight grads accumulated fp32 (g)
+// for the AdamW master. Mirrors model_backward op-for-op.
+void model_backward_bf16(Model *m) {
+  Config c = m->cfg;
+  long R = (long)c.batch * c.seq;
+  CK(cudaMemset(m->g_arena.base, 0, m->g_arena.off));
+  k_cross_entropy_bwd_bf(m->a.probs, m->d_tgt, m->s_bf.logits, R, c.vocab, 1.f / R);
+  backward_bf16_tail(m);
+}
+
+// GRPO policy-gradient backward: same stack pass, but dlogits comes from the per-row
+// coefficient (advantage - KL term, masked, 1/N folded in) instead of cross-entropy.
+// d_coef is a device [B*T] buffer; the forward (probs in m->a.probs) must have run first.
+void model_grpo_backward(Model *m, const float *d_coef) {
+  Config c = m->cfg;
+  long R = (long)c.batch * c.seq;
+  CK(cudaMemset(m->g_arena.base, 0, m->g_arena.off));
+  k_grpo_dlogits_bf(m->a.probs, m->d_tgt, d_coef, m->s_bf.logits, R, c.vocab);
+  backward_bf16_tail(m);
 }
 
 // Tensor-parallel bf16 backward. Conjugate of forward: row-parallel (proj/fcproj)
