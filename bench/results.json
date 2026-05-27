@@ -1,0 +1,53 @@
+{
+  "_note": "Measured Kharon numbers, M1-M9. Hardware/versions pinned in ENV.md. Cluster jobs cited per series. Regenerate plots with: python bench/plot.py",
+  "env": {
+    "gpu_primary": "NVIDIA L40S (sm_89, 48GB, PCIe, no NVLink)",
+    "gpu_dev": "RTX 4060 Laptop (sm_89, 8GB)",
+    "cuda": "12.6.1", "nccl": "nvhpc-nccl/24.5", "mpi": "openmpi/4.1.8-cuda",
+    "bf16_dense_peak_tflops": 181.05
+  },
+  "gemm_bf16_vs_fp32_cublas": {"_unit": "speedup", "_dev": "4060", "speedup": 3.3, "rel_frobenius": 0.0024},
+  "flashattention_fp32": {"_dev": "L40S", "tflops": 1.5, "frac_of_cublas_naive": 0.82, "fwd_ms_T512": 0.73},
+  "single_gpu_step": {"_dev": "L40S", "ms_per_step": 0.64, "tok_per_s": 805000, "_4060_ms": 7.1, "_4060_tok": 72000},
+  "torch_vs_kharon_proxy": {"_dev": "L40S", "_job": "5348832", "_config": "d512x8L seq256 batch32 bf16",
+    "kharon_c_tok_s": 115000, "pytorch_eager_tok_s": 176011, "pytorch_eager_ms": 46.54,
+    "kharon_over_pytorch": 0.65, "pytorch_compile": "failed (inductor backend error in module env)"},
+  "parallel_scaling_tok_s": {
+    "_dev": "L40S proxy d512x8L", "_jobs": "M4/5/6",
+    "labels": ["1 GPU", "TP2", "PP2", "TP2xPP2 (4)"],
+    "tok_s": [114000, 146000, 217000, 268000],
+    "speedup": [1.0, 1.28, 1.90, 2.35]
+  },
+  "comms_breakdown_ms": {
+    "_dev": "L40S", "_note": "per-step ms; TP all-reduce dominates on PCIe",
+    "TP2xPP2_proxy": {"compute": 172, "tp_allreduce": 52, "pp_bubble": 20, "dp_optcomm": 0},
+    "TP2xPP2xDP2_1B": {"compute": 729, "tp_allreduce": 130, "pp_bubble": 111, "dp_optcomm": 102}
+  },
+  "bubble_fraction_pct": {
+    "_dev": "L40S", "_job": "M5", "P": 2,
+    "M": [8, 16, 32, 64],
+    "measured": [10.3, 6.2, 4.2, 2.8],
+    "theory": [11.1, 5.9, 3.0, 1.5]
+  },
+  "full_mesh_8gpu": {
+    "_dev": "8x L40S", "_job": "5348750", "model": "1.2B (d2048 x 24L)",
+    "tok_s": 30549, "mfu_pct": 15.3, "mem_gb_per_rank": 19.1, "ms_per_step": 1072,
+    "zero1_opt_shard_mb": 1215, "zero1_opt_replicated_mb": 2430
+  },
+  "inference_tok_s": {
+    "_dev": "L40S", "_job": "5348786", "prompt": 128, "new": 256,
+    "G": [1, 8, 16, 32],
+    "tok_s_350M": [166, 810, 1619, 2693],
+    "tok_s_1p2B": [82, 531, 941, 1606]
+  },
+  "kv_mem_efficiency": {"_note": "paged vs naive (reserve full seq)", "x_paged_vs_naive_350M": 2.67, "x_1p2B": 2.0},
+  "prefix_sharing_saved_mb_1p2B": {"G": [8, 16, 32], "mb": [352, 755, 1560]},
+  "grpo": {
+    "_dev": "L40S", "_job": "5348827", "task": "single-digit addition (byte-level)",
+    "sft_acc": [0.0, 0.18, 0.84, 0.89, 0.87],
+    "sft_step": [0, 50, 100, 150, 200],
+    "grpo_acc": [1.0, 0.945, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "grpo_step": [50, 100, 150, 200, 250, 300, 350, 400],
+    "rollout_tok_s": 51000, "prefix_blocks_saved_per_step": 30
+  }
+}
