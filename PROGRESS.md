@@ -15,7 +15,7 @@
 | 7 | +ZeRO-1 DP (8 GPU) | done | ✓ ZeRO update bit-identical; mesh loss tracks baseline; resume bit-exact | 1.2B on 8 GPU: 30.5k tok/s, MFU 15.3%, 19.1GB/rank | DP all-gather is fp32 (future: bf16 gather) |
 | 8 | Inference engine | done | ✓ paged decode == PyTorch greedy (token-exact); paged == contiguous | 1.2B G=32 1606 tok/s; paged KV 2x; prefix saves 1.5GB @G=32 | paged-attn is 1 block/(tok,head) (future: tiled) |
 | 9 | GRPO loop | done | ✓ advantages vs formula; GRPO bwd == CE bwd (bit-exact) + linearity | reward curve moves (0→0.65 reward, acc 0→~12%+); prefix-shared rollouts | exact-match is hard for the proxy (shaped reward) |
-| 10 | Benchmark + writeup | not started | — | — | — |
+| 10 | Benchmark + writeup | done | — (consolidation) | bench/REPORT.md + 5 plots; PyTorch eager 1.53x faster single-GPU (honest loss) | official-FA/vLLM/Megatron head-to-heads install-gated |
 
 States: not started / in progress / oracle-passing / benchmarked / done
 
@@ -40,8 +40,15 @@ States: not started / in progress / oracle-passing / benchmarked / done
 - M3 memory budget: bf16 mixed = 18 B/param (fp32 master 4 + bf16 weight 2 + fp32 grad 4
   + adamw m,v 8). 1.3B target -> ~23.6GB params/opt + acts; borderline on 48GB, so M3 uses
   a proxy (~d=1024 x 12L ~200M params ~3.6GB) to prove the loop; full 1B waits for M4-M7.
-- FlashAttention vs official: __ (deferred to M3 — official FA is BF16/tensor-core)
-- Custom GEMM vs cuBLAS (shape __): __
+- Kharon C vs PyTorch eager, single-GPU, SAME proxy (d512x8L seq256 batch32 bf16, L40S job
+  5348832): PyTorch eager 176k tok/s (46.5 ms) vs Kharon 115k tok/s -> PyTorch 1.53x FASTER
+  (Kharon 0.65x). The honest end-to-end loss: PyTorch uses fused tensor-core bf16 SDPA;
+  Kharon's attention is hand-written FP32 (0.82x cuBLAS-naive). bf16 GEMMs match vendor.
+  torch.compile failed (inductor backend error in the pytorch/2.1.0 module env). Top fix:
+  tensor-core bf16 FlashAttention (the FA kernel doesn't yet use the M3 GEMM path).
+- FlashAttention vs official: official FA is fused bf16/tensor-core (inside PyTorch SDPA above);
+  ours is FP32 warp-per-row 0.82x cuBLAS-naive. Direct standalone head-to-head install-gated.
+- Custom GEMM vs cuBLAS: we call cuBLAS (cublasGemmEx) for the GEMMs; bf16 vs fp32 = 3.3x.
 - Bubble fraction (1F1B, L40S): P=2 M=8/16/32/64 = 10.3/6.2/4.2/2.8% (theory 11.1/5.9/3.0/1.5);
   P=4 M=16/32/64 = 16.0/10.4/6.4% (theory 15.8/8.6/4.5). Tracks (P-1)/(M+P-1); excess over
   theory at large M is real PCIe send/recv cost. P=2 scales 1.89x on 2 GPUs (vs TP's 1.33x:
@@ -108,6 +115,16 @@ States: not started / in progress / oracle-passing / benchmarked / done
 
 ## Session log
 <!-- newest first: date — what was done — what's next -->
+- 2026-05-30 (autonomous) — M10 DONE. The honest performance map: bench/REPORT.md (wins/losses
+  + why), bench/results.json (single source of truth for every number), bench/plot.py -> 5 plots
+  checked in (scaling, comms breakdown, bubble, inference, GRPO), bench/run_all.sh (one
+  entrypoint), README.md headline + reproduction. Ran a real PyTorch baseline on L40S (job
+  5348832, same proxy): PyTorch eager 176k vs Kharon 115k tok/s -> PyTorch 1.53x faster
+  end-to-end, the honest single-GPU loss (fused tensor-core SDPA vs our FP32 FA). Map summary:
+  WIN bf16 GEMM (3.3x) + systems work (paged-KV 2-2.67x mem, 8-GPU ZeRO-3D mesh MFU 15.3%, GRPO
+  ->100%); LOSE the attention kernel single-GPU; interconnect-bound (PCIe no-NVLink) at scale.
+  Open (honest): official-FA/vLLM/Megatron head-to-heads + A100-NVLink TP study are install/
+  allocation-gated. m10-bench merged. ALL 10 MILESTONES DONE.
 - 2026-05-30 (autonomous) — M9 DONE, validated on L40S (job 5348827) + 4060. GRPO (no critic)
   on byte-level single-digit addition. Reused the M7 trainer (policy-gradient via a new
   model_grpo_backward: dlogits = coef*(probs-onehot), coef = mask*(advantage - beta*KL)/N;
