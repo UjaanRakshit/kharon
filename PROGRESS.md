@@ -14,7 +14,7 @@
 | 6 | TP×PP | done | ✓ TP2xPP2 loss matches single-GPU | 4-GPU 268k tok/s (2.35x); TP all-reduce dominates | overlap is future (1 stream) |
 | 7 | +ZeRO-1 DP (8 GPU) | done | ✓ ZeRO update bit-identical; mesh loss tracks baseline; resume bit-exact | 1.2B on 8 GPU: 30.5k tok/s, MFU 15.3%, 19.1GB/rank | DP all-gather is fp32 (future: bf16 gather) |
 | 8 | Inference engine | done | ✓ paged decode == PyTorch greedy (token-exact); paged == contiguous | 1.2B G=32 1606 tok/s; paged KV 2x; prefix saves 1.5GB @G=32 | paged-attn is 1 block/(tok,head) (future: tiled) |
-| 9 | GRPO loop | done | ✓ advantages vs formula; GRPO bwd == CE bwd (bit-exact) + linearity | reward curve moves (0→0.65 reward, acc 0→~12%+); prefix-shared rollouts | exact-match is hard for the proxy (shaped reward) |
+| 9 | GRPO loop | done | ✓ advantages vs formula; GRPO bwd == CE bwd (bit-exact) + linearity | SFT 0→~90% then GRPO refines →100%; rollouts 51k tok/s prefix-shared | cold-start RL collapses (needs pretrained policy) |
 | 10 | Benchmark + writeup | done | — (consolidation) | bench/REPORT.md + 5 plots; PyTorch eager 1.53x faster single-GPU (honest loss) | official-FA/vLLM/Megatron head-to-heads install-gated |
 
 States: not started / in progress / oracle-passing / benchmarked / done
