@@ -47,7 +47,7 @@ $(BUILD)/train.exe: src/train.c $(OBJ) $(HDRS) | $(BUILD)
 $(BUILD)/grpo_train.exe: src/grpo_train.c $(OBJ) $(HDRS) | $(BUILD)
 	$(NVCC) $(NVCCFLAGS) $(CSTD) $< $(OBJ) -o $@ $(LDLIBS)
 
-# Multi-GPU (NCCL + MPI) targets — cluster only. mpicxx supplies MPI; NCCL via $NCCL_ROOT.
+# Multi-GPU (NCCL + MPI) targets - cluster only. mpicxx supplies MPI; NCCL via $NCCL_ROOT.
 MPICXX  ?= mpicxx
 NCCL_INC := $(if $(NCCL_ROOT),-I$(NCCL_ROOT)/include,)
 NCCL_LIB := $(if $(NCCL_ROOT),-L$(NCCL_ROOT)/lib,) -lnccl

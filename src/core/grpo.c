@@ -2,7 +2,7 @@
 #include <math.h>
 
 // Group-relative advantage: within each group of `group` completions, center by the
-// group mean and scale by the group std. This is the whole "no critic" trick — the
+// group mean and scale by the group std. This is the whole "no critic" trick - the
 // baseline is the group itself, so reward variance inside a group drives the update.
 void grpo_advantages(const float *rewards, int n_groups, int group, float eps, float *adv) {
   for (int g = 0; g < n_groups; g++) {

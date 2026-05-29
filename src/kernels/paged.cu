@@ -6,7 +6,7 @@
 
 // Inference kernels for the paged-KV decode path. Q/K/V are read straight from the
 // fused qkv buffer [ntok,3d] (q=[..,0:d], k=[..,d:2d], v=[..,2d:3d]) viewed as
-// [ntok,H,hd] — no head transpose, unlike the training FlashAttention layout.
+// [ntok,H,hd] - no head transpose, unlike the training FlashAttention layout.
 
 template <class T> __device__ __forceinline__ float toF(T x);
 template <> __device__ __forceinline__ float toF<float>(float x) { return x; }

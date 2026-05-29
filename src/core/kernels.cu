@@ -30,28 +30,28 @@ void mm_nt_bf16(const void *A, const void *B, float *C, int M, int N, int K) {
                          B, CUDA_R_16BF, K, A, CUDA_R_16BF, K, &b,
                          C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
-// bf16 in/out (fp32 accum) — forward activation GEMMs stay in bf16 storage.
+// bf16 in/out (fp32 accum) - forward activation GEMMs stay in bf16 storage.
 void mm_nt_bf16o(const void *A, const void *B, void *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
   CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &a,
                          B, CUDA_R_16BF, K, A, CUDA_R_16BF, K, &b,
                          C, CUDA_R_16BF, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
-// C[M,N] = A[K,M]^T @ B[K,N], bf16 in, fp32 out — weight grads (feed fp32 AdamW).
+// C[M,N] = A[K,M]^T @ B[K,N], bf16 in, fp32 out - weight grads (feed fp32 AdamW).
 void mm_tn_bf16(const void *A, const void *B, float *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
   CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, &a,
                          B, CUDA_R_16BF, N, A, CUDA_R_16BF, M, &b,
                          C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
-// Same, but accumulates into C (beta=1) — for grad accumulation across microbatches.
+// Same, but accumulates into C (beta=1) - for grad accumulation across microbatches.
 void mm_tn_bf16_acc(const void *A, const void *B, float *C, int M, int N, int K) {
   const float a = 1.f, b = 1.f;
   CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, &a,
                          B, CUDA_R_16BF, N, A, CUDA_R_16BF, M, &b,
                          C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 }
-// C[M,N] = A[M,K] @ B[K,N], bf16 in/out — activation grads stay bf16.
+// C[M,N] = A[M,K] @ B[K,N], bf16 in/out - activation grads stay bf16.
 void mm_nn_bf16o(const void *A, const void *B, void *C, int M, int N, int K) {
   const float a = 1.f, b = 0.f;
   CUBLAS_CK(cublasGemmEx(g_h, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &a,

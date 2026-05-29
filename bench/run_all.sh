@@ -20,11 +20,11 @@ python bench/plot.py
 cat <<'EOF'
 
 == cluster series (run via scripts/, numbers recorded in bench/results.json) ==
-  scripts/ice_m6_tppp.sbatch    TP/PP/TP×PP scaling + comms breakdown (4 GPU)
-  scripts/ice_m7_3d.sbatch      full 8-GPU TP×PP×DP mesh, ZeRO-1, 1.2B (MFU, mem)
+  scripts/ice_m6_tppp.sbatch    TP/PP/TPxPP scaling + comms breakdown (4 GPU)
+  scripts/ice_m7_3d.sbatch      full 8-GPU TPxPPxDP mesh, ZeRO-1, 1.2B (MFU, mem)
   scripts/ice_m8_infer.sbatch   paged-KV inference throughput + KV-mem efficiency
   scripts/ice_m9_grpo.sbatch    GRPO SFT->RL reward curve
   scripts/ice_m10_torch.sbatch  PyTorch baseline (same config, L40S)
 
-See bench/REPORT.md for the full performance map.
+See README.md for the full performance map.
 EOF

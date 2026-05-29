@@ -267,7 +267,7 @@ void model_init_weights(Model *m, uint64_t seed) {
 // then copy the [Rs,Cs] block at (r0,c0) to the device shard. Identical RNG order
 // across ranks => the shards reassemble to the same weights as single-GPU.
 // NULL dptr => consume RNG only (keeps the global weight stream in sync across ranks
-// that don't own this tensor — needed for PP + PP*TP consistency).
+// that don't own this tensor - needed for PP + PP*TP consistency).
 static void fill_normal_block(float *dptr, int Rf, int Cf, int r0, int Rs, int c0, int Cs,
                               float std, Rng *st) {
   float *full = (float *)malloc((long)Rf * Cf * 4);

@@ -15,7 +15,7 @@ def save(fig, name):
     fig.tight_layout(); fig.savefig(os.path.join(OUT, name), dpi=110); plt.close(fig)
     print("wrote plots/" + name)
 
-# 1. Parallel scaling (tok/s) — TP vs PP vs composed, on PCIe.
+# 1. Parallel scaling (tok/s) - TP vs PP vs composed, on PCIe.
 s = R["parallel_scaling_tok_s"]
 fig, ax = plt.subplots(figsize=(6, 4))
 ax.bar(s["labels"], [t / 1e3 for t in s["tok_s"]], color="#4C72B0")
@@ -24,7 +24,7 @@ for i, sp in enumerate(s["speedup"]):
 ax.set_ylabel("tok/s (thousands)"); ax.set_title("Parallel scaling (L40S PCIe, d512x8L proxy)")
 save(fig, "scaling.png")
 
-# 2. Comms breakdown per step (1.2B on 8 GPU) — where the time goes.
+# 2. Comms breakdown per step (1.2B on 8 GPU) - where the time goes.
 b = R["comms_breakdown_ms"]["TP2xPP2xDP2_1B"]
 fig, ax = plt.subplots(figsize=(6, 4))
 parts = ["compute", "tp_allreduce", "pp_bubble", "dp_optcomm"]

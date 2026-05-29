@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # PyTorch baseline for the Kharon single-GPU step, SAME proxy config (d512 x 8L, seq256,
 # batch32, bf16). Reports tokens/sec for eager and (if available) torch.compile, so the
-# REPORT can state "hand-written C is Nx PyTorch eager / Mx compiled" on identical shapes.
+# README can state "hand-written C is Nx PyTorch eager / Mx compiled" on identical shapes.
 import time, math, argparse
 import torch, torch.nn as nn, torch.nn.functional as F
 

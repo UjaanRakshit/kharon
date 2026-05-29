@@ -18,7 +18,7 @@ echo "=== build ==="; make all tp 2>&1 | tail -2
 BASE="--layers 8 --d 512 --heads 8 --seq 256 --mbatch 16 --M 16 --data data/input.bin"
 echo "=== oracle: single-GPU (PP1,TP1) baseline ==="
 mpirun -n 1 ./build/pp_train.exe $BASE --tp 1 --steps 200 --log 50
-echo "=== TP2 x PP2 (4 GPU) — loss should match baseline; + comms breakdown ==="
+echo "=== TP2 x PP2 (4 GPU) - loss should match baseline; + comms breakdown ==="
 mpirun -n 4 ./build/pp_train.exe $BASE --tp 2 --steps 200 --log 50
 echo "=== cross-check: pure TP2 (2 GPU, PP1) and pure PP2 (2 GPU, TP1) ==="
 mpirun -n 2 ./build/pp_train.exe $BASE --tp 2 --steps 1 --log 1000

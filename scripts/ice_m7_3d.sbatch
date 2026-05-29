@@ -20,7 +20,7 @@ echo "=== oracle: single-GPU baseline over the global batch (M=32) ==="
 mpirun -n 1 ./build/pp_train.exe $SMALL --tp 1 --dp 1 --M 32 --steps 200 --log 50
 echo "=== DP grad-averaging cross-check: pure DP2 (2 GPU, M=16/replica) should match baseline ==="
 mpirun -n 2 ./build/pp_train.exe $SMALL --tp 1 --dp 2 --M 16 --steps 200 --log 50
-echo "=== full mesh TP2 x PP2 x DP2 (8 GPU) — loss tracks baseline; headline numbers ==="
+echo "=== full mesh TP2 x PP2 x DP2 (8 GPU) - loss tracks baseline; headline numbers ==="
 mpirun -n 8 ./build/pp_train.exe $SMALL --tp 2 --dp 2 --M 16 --steps 200 --log 50
 
 echo "=== checkpoint/resume bit-exact across the sharded 8-GPU mesh ==="

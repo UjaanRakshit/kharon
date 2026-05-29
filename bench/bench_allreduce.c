@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 
 // 2-rank (or N-rank) NCCL all-reduce: correctness + PCIe bus bandwidth. This is
-// the M4 interconnect measurement — L40S has no NVLink, so every byte is PCIe.
+// the M4 interconnect measurement - L40S has no NVLink, so every byte is PCIe.
 int main(int argc, char **argv) {
   Comms c;
   comms_init(&c);

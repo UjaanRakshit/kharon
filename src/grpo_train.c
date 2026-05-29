@@ -44,7 +44,7 @@ static float reward(const int *completion, const char *ans) {
 }
 
 // Greedy held-out accuracy over all 100 (a,b) problems. show>0 prints sample completions
-// (so reward hacking — e.g. always emitting one "safe" number — is visible, not hidden).
+// (so reward hacking - e.g. always emitting one "safe" number - is visible, not hidden).
 static float eval_accuracy(Engine *e, int show) {
   infer_set_sampling(e, 0.f, 1);                 // greedy
   int correct = 0, total = 0, shown = 0;
